@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific: source corpus checkout (kept out of this repository)
+data/dictorpus-data/
+
+# Generated experiment outputs (tracked examples stay in results/ explicitly)
+results/**/*.tmp
+results/**/.*.lock
