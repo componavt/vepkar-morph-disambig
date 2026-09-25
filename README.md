@@ -16,26 +16,36 @@ directions:
 
 ## Status
 
-This is the initial scaffold: the command-line entry point and the directory
-layout. Data fetching, validation, models, and evaluation are not implemented
-yet.
+The CLI scaffold and the tagged source-data fetch command are implemented.
+CSV reading, validation, models, and evaluation are not implemented yet.
 
 ## Usage
+
+Git and Python 3.11 or newer are required. Fetch all source exports once with
+a specific published tag of `componavt/dictorpus-data`:
+
+```bash
+python3 src/cli.py fetch-data v2026.09
+```
+
+The tag above is an example; use a tag actually published by the data repository.
+The command creates `data/dictorpus-data/`, an ignored local Git checkout. A
+repeat request for the same tag leaves a clean checkout unchanged; an existing
+checkout with another tag or local modifications is never replaced. Future
+experiments will read this local checkout without repeating the tag argument.
 
 ```bash
 python3 src/cli.py --help
 python3 src/cli.py --version
-python3 src/cli.py
 ```
 
 ## Tests
 
 ```bash
-python3 -m pytest -q tests/test_cli.py
+python3 -m pytest -q
 ```
 
 ## Data
 
-Corpus data will later be obtained separately from `dictorpus-data` and is
-not committed here; `data/dictorpus-data/` is Git-ignored. Derived shared
-inputs will live under `data/derived/`.
+Corpus data come separately from `dictorpus-data` and are not committed here.
+Derived shared inputs will live under `data/derived/`.
