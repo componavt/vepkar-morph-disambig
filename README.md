@@ -28,11 +28,12 @@ a specific published tag of `componavt/dictorpus-data`:
 python3 src/cli.py fetch-data v2026.09
 ```
 
-The tag above is an example; use a tag actually published by the data repository.
-The command creates `data/dictorpus-data/`, an ignored local Git checkout. A
-repeat request for the same tag leaves a clean checkout unchanged; an existing
-checkout with another tag or local modifications is never replaced. Future
-experiments will read this local checkout without repeating the tag argument.
+In 2026, `v2026.09` is the published recommended tag for the first local
+checkout. The command creates `data/dictorpus-data/`, an ignored local Git
+checkout. A repeat request for the same tag leaves a clean checkout unchanged;
+an existing checkout with another tag or local modifications is never replaced.
+Future experiments will read this local checkout without repeating the tag
+argument.
 
 ```bash
 python3 src/cli.py --help
