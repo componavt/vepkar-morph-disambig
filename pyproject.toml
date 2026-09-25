@@ -1,0 +1,13 @@
+[project]
+name = "vepkar-morph-disambig"
+version = "0.1.0"
+description = "Ranking candidate morphological analyses of words in VepKar context"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
