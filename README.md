@@ -16,8 +16,9 @@ directions:
 
 ## Status
 
-The CLI scaffold and the tagged source-data fetch command are implemented.
-CSV reading, validation, models, and evaluation are not implemented yet.
+The CLI scaffold, the tagged source-data fetch command, and typed corpus
+loading with schema/join validation (`inspect-data`) are implemented.
+Models and evaluation are not implemented yet.
 
 ## Usage
 
@@ -38,7 +39,18 @@ argument.
 ```bash
 python3 src/cli.py --help
 python3 src/cli.py --version
+python3 src/cli.py inspect-data krl
 ```
+
+`inspect-data` reads the local tagged corpus checkout under
+`data/dictorpus-data/corpus/`, parses the four corpus tables into typed
+DataFrames, and reports row counts, schema and identifier checks, duplicate and
+join integrity, candidate-group counts, and `relevance=2` expert-selection
+diagnostics. Pipe-separated `corpus_id` and `genre_id` source fields are parsed
+into tuple-valued `corpus_ids` and `genre_ids`. The command writes no derived
+data and never modifies `dictorpus-data`. An optional `--data-dir` overrides the
+checkout location (used by the offline tests). Models, splits, benchmarks, and
+evaluation are not implemented yet.
 
 ## Tests
 
