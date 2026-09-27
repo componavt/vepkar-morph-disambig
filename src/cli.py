@@ -6,8 +6,24 @@ import argparse
 import tomllib
 from pathlib import Path
 
-from core.data import DEFAULT_DATA_DIR, DataError, read_corpus_tables
+from core.data import (
+    DEFAULT_DATA_DIR,
+    SUPPORTED_LANGUAGES,
+    DataError,
+    read_corpus_tables,
+    resolve_data_dir,
+)
 from core.fetch import FetchError, fetch_data
+from core.instances import (
+    DEFAULT_OUTPUT_DIR,
+    CorpusTagError,
+    LanguageInstances,
+    build_language_instances,
+    build_review_rows,
+    determine_data_tag,
+    review_csv_path,
+    write_review_csv,
+)
 from core.validation import CorpusError, inspect_corpus
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +56,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    build = commands.add_parser(
+        "build-instances",
+        help="Build benchmark instances and the developer sentence-review CSV",
+    )
+    build.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    build.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory for derived outputs (default: data/derived/quality)",
     )
     return parser
 
@@ -128,6 +160,50 @@ def _print_report(inspection, corpus_dir: Path) -> None:
     print(f"Result: {result}; source data unchanged")
 
 
+def _print_language_report(result: LanguageInstances) -> None:
+    print()
+    print(f"=== {result.language} ===")
+    print("FUNNEL (word instances)")
+    for step in result.funnel:
+        print(f"  step {step.index}  {step.name}")
+        print(f"      retained: {step.retained}")
+        if step.index > 0:
+            print(f"      removed at this transition: {step.removed}")
+    print("OVERLAP DIAGNOSTICS (among step-1 words)")
+    print(
+        "  duplicate candidate identities:             "
+        f"{result.step1_words_with_duplicate_identity}"
+    )
+    print(
+        "  selected analysis with empty gramset:       "
+        f"{result.step1_words_with_selected_empty_gramset}"
+    )
+    print(
+        "  unselected analysis with empty gramset:     "
+        f"{result.step1_words_with_unselected_empty_gramset}"
+    )
+    print(
+        "  unavailable sentence or text:               "
+        f"{result.step1_words_with_unavailable_sentence}"
+    )
+    print(
+        "  zero-position sentence:                     "
+        f"{result.step1_words_with_zero_position_sentence}"
+    )
+    print(
+        "  repeated positive-position sentence:        "
+        f"{result.step1_words_with_repeated_position_sentence}"
+    )
+    print(f"ZERO-POSITION SENTENCES: {len(result.zero_position_sentences)}")
+    print("EMPTY UNSELECTED GRAMSET POLICY")
+    print(
+        "  primary instances with >=1 unselected empty gramset: "
+        f"{result.primary_words_with_unselected_empty_gramset}"
+    )
+    print(f"  primary pool size: {len(result.instances)}")
+    print(f"  alternative pool size: {result.alternative_primary_pool_size}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -148,6 +224,29 @@ def main(argv: list[str] | None = None) -> int:
             parser.exit(1, f"error: {exc}\n")
         _print_report(inspection, data_dir / "corpus")
         return 1 if inspection.has_broken_integrity else 0
+    if args.command == "build-instances":
+        data_dir = resolve_data_dir(args.data_dir)
+        output_dir = args.output_dir if args.output_dir is not None else DEFAULT_OUTPUT_DIR
+        try:
+            tag = determine_data_tag(data_dir)
+            print(f"Source tag: {tag}")
+            results = {}
+            total_primary = 0
+            for lang in SUPPORTED_LANGUAGES:
+                tables = read_corpus_tables(lang, data_dir)
+                result = build_language_instances(lang, tables)
+                results[lang] = result
+                total_primary += len(result.instances)
+                _print_language_report(result)
+            rows = build_review_rows(results.values())
+            path = review_csv_path(output_dir, tag)
+            written = write_review_csv(path, rows)
+        except (DataError, CorpusTagError) as exc:
+            parser.exit(1, f"error: {exc}\n")
+        print()
+        print(f"Total primary instances (step 6): {total_primary}")
+        print(f"Review CSV: {path} ({written} rows)")
+        return 0
     parser.print_help()
     return 0
 
