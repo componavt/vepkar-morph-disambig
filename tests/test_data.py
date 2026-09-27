@@ -192,7 +192,7 @@ def test_non_integer_required_sentence_id_rejected(tmp_path, column):
         read_sentences("krl", tmp_path)
 
 
-@pytest.mark.parametrize("value", ["0", "-5", "", "abc"])
+@pytest.mark.parametrize("value", ["-5", "", "abc", "01"])
 def test_non_positive_word_number_rejected(tmp_path, value):
     build_fixture(tmp_path)
     bad = [(100, 10, value, "tere")]
@@ -201,12 +201,13 @@ def test_non_positive_word_number_rejected(tmp_path, value):
         read_words("krl", tmp_path)
 
 
-def test_word_number_zero_rejected(tmp_path):
+def test_word_number_zero_accepted_and_typed(tmp_path):
     build_fixture(tmp_path)
     bad = [(100, 10, 0, "tere")]
     write_zst_csv(tmp_path / "corpus" / "words_krl.csv.zst", WORD_COLS, bad)
-    with pytest.raises(DataError, match="word_number"):
-        read_words("krl", tmp_path)
+    words = read_words("krl", tmp_path)
+    assert words["word_number"].iloc[0] == 0
+    assert str(words["word_number"].dtype) == "Int64"
 
 
 @pytest.mark.parametrize("value", ["3", "abc", ""])
@@ -226,12 +227,14 @@ def test_invalid_year_rejected(tmp_path):
         read_texts("krl", tmp_path)
 
 
-def test_empty_gramset_rejected(tmp_path):
+def test_empty_gramset_retained_as_empty_string(tmp_path):
     build_fixture(tmp_path)
     bad = [(100, 9001, "", 2)]
-    write_zst_csv(tmp_path / "corpus" / "candidate_analyses_krl.csv.zst", CAND_COLS, bad)
-    with pytest.raises(DataError, match="gramset"):
-        read_candidates("krl", tmp_path)
+    write_zst_csv(tmp_path / "corpus" / "candidate_analyses_krl.csv.zst",
+                  CAND_COLS, bad)
+    candidates = read_candidates("krl", tmp_path)
+    assert candidates["gramset"].iloc[0] == ""
+    assert str(candidates["gramset"].dtype) == "string"
 
 
 def test_unsupported_language_rejected(tmp_path):

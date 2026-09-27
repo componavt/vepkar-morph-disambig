@@ -47,10 +47,16 @@ python3 src/cli.py inspect-data krl
 DataFrames, and reports row counts, schema and identifier checks, duplicate and
 join integrity, candidate-group counts, and `relevance=2` expert-selection
 diagnostics. Pipe-separated `corpus_id` and `genre_id` source fields are parsed
-into tuple-valued `corpus_ids` and `genre_ids`. The command writes no derived
-data and never modifies `dictorpus-data`. An optional `--data-dir` overrides the
-checkout location (used by the offline tests). Models, splits, benchmarks, and
-evaluation are not implemented yet.
+into tuple-valued `corpus_ids` and `genre_ids`. The command prints the complete
+available diagnostics before it returns a nonzero status for broken links or
+duplicate keys. Zero `word_number` values and empty `gramset` values are
+preserved and reported as findings rather than removed. For each reported
+finding, at most three contextual examples are shown with the original sentence
+XML when the link is unique; when the sentence XML cannot be retrieved, the
+reason is stated explicitly. No per-row issue file is generated. The command
+writes no derived data and never modifies `dictorpus-data`. An optional
+`--data-dir` overrides the checkout location (used by the offline tests).
+Models, splits, benchmarks, and evaluation are not implemented yet.
 
 ## Tests
 

@@ -25,15 +25,16 @@ _CANDIDATE_COLUMNS = ("word_id", "wordform_id", "gramset", "relevance")
 
 _TEXT_RESULT_COLUMNS = ("text_id", "corpus_ids", "dialect_code", "genre_ids", "year_recorded")
 
-_REQUIRED_ID_COLUMNS = {
+_REQUIRED_POSITIVE_IDS = {
     "texts": ("text_id",),
     "sentences": ("sentence_id", "text_id"),
-    "words": ("word_id", "sentence_id", "word_number"),
+    "words": ("word_id", "sentence_id"),
     "candidate_analyses": ("word_id", "wordform_id"),
 }
 
 _POSITIVE_INT = r"[1-9][0-9]*"
 _META_PATTERN = rf"{_POSITIVE_INT}(\|{_POSITIVE_INT})*"
+_WORD_NUMBER_PATTERN = r"0|[1-9][0-9]*"
 
 
 def _check_zstd_support() -> None:
@@ -110,13 +111,20 @@ def _fail_column(path: Path, column: str, count: int, examples: list[str]) -> No
 
 
 def _validate_required_ids(frame: pd.DataFrame, stem: str, path: Path) -> None:
-    for column in _REQUIRED_ID_COLUMNS[stem]:
+    for column in _REQUIRED_POSITIVE_IDS[stem]:
         raw = frame[column].astype(str)
         bad = ~raw.str.fullmatch(_POSITIVE_INT)
         if bad.any():
             examples = raw[bad].unique()[:5].tolist()
             _fail_column(path, column, int(bad.sum()), examples)
         frame[column] = raw.astype("Int64")
+    if stem == "words":
+        raw = frame["word_number"].astype(str)
+        bad = ~raw.str.fullmatch(_WORD_NUMBER_PATTERN)
+        if bad.any():
+            examples = raw[bad].unique()[:5].tolist()
+            _fail_column(path, "word_number", int(bad.sum()), examples)
+        frame["word_number"] = raw.astype("Int64")
 
 
 def _parse_pipe_int_list(frame: pd.DataFrame, column: str, path: Path) -> pd.Series:
@@ -139,13 +147,6 @@ def _parse_year(frame: pd.DataFrame, path: Path) -> pd.Series:
     years = pd.Series(pd.NA, index=frame.index, dtype="Int64")
     years[~blank] = raw[~blank].astype("Int64")
     return years
-
-
-def _check_gramset_nonempty(frame: pd.DataFrame, path: Path) -> None:
-    empties = frame["gramset"].astype(str) == ""
-    if empties.any():
-        examples = frame.loc[empties, "word_id"].astype(str).unique()[:5].tolist()
-        _fail_column(path, "gramset", int(empties.sum()), examples)
 
 
 def read_texts(lang: str, data_dir: Path | None = None) -> pd.DataFrame:
@@ -192,7 +193,6 @@ def read_candidates(lang: str, data_dir: Path | None = None) -> pd.DataFrame:
         examples = raw[bad].unique()[:5].tolist()
         _fail_column(path, "relevance", int(bad.sum()), examples)
     frame["relevance"] = raw.astype("Int64")
-    _check_gramset_nonempty(frame, path)
     frame["gramset"] = frame["gramset"].astype("string")
     return frame[list(_CANDIDATE_COLUMNS)]
 
