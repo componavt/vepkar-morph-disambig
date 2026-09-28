@@ -90,15 +90,30 @@ def test_missing_custom_data_dir_fails_all_three(tmp_path, args):
         ("make-splits",),
     ],
 )
-def test_missing_default_checkout_offers_fetch_command(args):
-    result = run_cli(*args)
-    assert result.returncode == 1
-    assert "dictorpus-data" in result.stderr
-    assert "fetch-data v2026.09" in result.stderr
-    assert "Traceback" not in result.stderr
-    assert "  vep  OK" not in result.stderr
-    assert "BENCHMARK" not in result.stdout
-    assert "SPLIT" not in result.stdout
+def test_missing_default_checkout_offers_fetch_command(tmp_path, monkeypatch, capsys, args):
+    monkeypatch.syspath_prepend(str(SRC))
+    import cli
+    import core.data as data
+
+    missing = tmp_path / "missing-default-checkout"
+
+    monkeypatch.setattr(data, "DEFAULT_DATA_DIR", missing)
+    monkeypatch.setattr(cli, "DEFAULT_DATA_DIR", missing)
+
+    try:
+        status = cli.main(list(args))
+    except SystemExit as exc:
+        status = exc.code
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "dictorpus-data" in captured.err
+    assert str(missing) in captured.err
+    assert "fetch-data v2026.09" in captured.err
+    assert "Traceback" not in captured.err
+    assert "  vep  OK" not in captured.err
+    assert "BENCHMARK" not in captured.out
+    assert "SPLIT" not in captured.out
 
 
 def test_incomplete_checkout_reports_missing_csv(tmp_path):
