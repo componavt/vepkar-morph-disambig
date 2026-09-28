@@ -26,6 +26,7 @@ from core.instances import (  # noqa: E402
     Candidate,
     CorpusTagError,
     Instance,
+    _ensure_materialized_word_ids,
     build_language_instances,
     determine_data_tag,
     has_empty_candidate_gramset,
@@ -412,6 +413,30 @@ def test_grouped_materialization_unsorted_source_rows(tmp_path):
         assert instance.sentence_xml == xml
         assert instance.candidates == candidates_expected
         assert instance.gold_analysis == gold
+
+
+def test_ensure_materialized_word_ids_accepts_complete_materialization():
+    _ensure_materialized_word_ids({1, 2, 3}, {1, 2, 3})
+
+
+def test_ensure_materialized_word_ids_reports_small_missing_set():
+    with pytest.raises(RuntimeError) as excinfo:
+        _ensure_materialized_word_ids({1, 2, 3}, {1})
+    message = str(excinfo.value)
+    assert "2 accepted word_id values" in message
+    assert "2, 3" in message
+    assert "..." not in message
+
+
+def test_ensure_materialized_word_ids_truncates_large_missing_set():
+    with pytest.raises(RuntimeError) as excinfo:
+        _ensure_materialized_word_ids(set(range(1, 20)), {1})
+    message = str(excinfo.value)
+    assert "18 accepted word_id values" in message
+    preview = message.split("values: ", 1)[1]
+    assert preview == "2, 3, 4, 5, 6, 7, 8, 9, 10, 11 ..."
+    assert "..." in preview
+    assert "12 ..." not in preview
 
 
 def test_determine_data_tag_requires_git_checkout(tmp_path):
