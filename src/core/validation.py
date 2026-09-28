@@ -14,6 +14,7 @@ from typing import Iterator
 import pandas as pd
 
 from core.data import CorpusTables
+from core.instances import GOLD_RELEVANCE
 
 
 class CorpusError(Exception):
@@ -38,6 +39,7 @@ class CorpusInspection:
     row_words: int
     row_candidates: int
     zero_word_number: int
+    zero_word_number_sentences: int
     empty_gramset: int
     empty_gramset_relevance_0: int
     empty_gramset_relevance_1: int
@@ -98,6 +100,32 @@ def _word_sentence_lookup(words: pd.DataFrame) -> dict[int, tuple[int, int]]:
         else:
             lookup[word_id] = (1, sentence_id)
     return lookup
+
+
+def _word_text_lookup(words: pd.DataFrame) -> dict[int, tuple[int, str]]:
+    """Map word_id to (occurrence count, first word text)."""
+    lookup: dict[int, tuple[int, str]] = {}
+    for word_id, word in zip(words["word_id"], words["word"]):
+        word_id = int(word_id)
+        if word_id in lookup:
+            count, first = lookup[word_id]
+            lookup[word_id] = (count + 1, first)
+        else:
+            lookup[word_id] = (1, word)
+    return lookup
+
+
+def _word_text_for_id(
+    word_id: int, word_lookup: dict[int, tuple[int, str]]
+) -> str:
+    """Return the word text or an explicit unavailability marker."""
+    entry = word_lookup.get(word_id)
+    if entry is None:
+        return "<unavailable>"
+    count, word = entry
+    if count > 1:
+        return "<unavailable>"
+    return word
 
 
 def _sentence_xml_for_id(
@@ -172,14 +200,22 @@ def _word_examples(
     )
 
 
+def _pick_empty_gramset_example(rows: pd.DataFrame) -> pd.DataFrame:
+    """Select one informative empty-gramset row: gold if present, else first."""
+    gold = rows.loc[rows["relevance"] == GOLD_RELEVANCE]
+    return gold.head(1) if len(gold) else rows.head(1)
+
+
 def _candidate_examples(
     rows: pd.DataFrame,
     word_lookup: dict[int, tuple[int, int]],
     sentence_lookup: dict[int, tuple[int, str]],
+    word_text_lookup: dict[int, tuple[int, str]],
 ) -> tuple[Example, ...]:
     return _examples(
         (
             f"word_id={int(r.word_id)}; wordform_id={int(r.wordform_id)}; "
+            f"word={_word_text_for_id(int(r.word_id), word_text_lookup)}; "
             f"relevance={int(r.relevance)}"
             for r in rows.itertuples()
         ),
@@ -202,9 +238,11 @@ def inspect_corpus(tables: CorpusTables, lang: str) -> CorpusInspection:
     )
     sentence_lookup = _sentence_xml_lookup(sentences)
     word_lookup = _word_sentence_lookup(words)
+    word_text_lookup = _word_text_lookup(words)
 
     zero_mask = words["word_number"] == 0
     zero_word_number = int(zero_mask.sum())
+    zero_word_number_sentences = int(words.loc[zero_mask, "sentence_id"].nunique())
 
     empty_gramset_mask = candidates["gramset"] == ""
     empty_gramset = int(empty_gramset_mask.sum())
@@ -235,19 +273,20 @@ def inspect_corpus(tables: CorpusTables, lang: str) -> CorpusInspection:
 
     if zero_word_number:
         examples["word_number=0"] = _word_examples(
-            words.loc[zero_mask].head(3), sentence_lookup
+            words.loc[zero_mask].head(1), sentence_lookup
         )
 
     if empty_gramset:
         examples["empty gramset"] = _candidate_examples(
-            candidates.loc[empty_gramset_mask].head(3),
+            _pick_empty_gramset_example(candidates.loc[empty_gramset_mask]),
             word_lookup,
             sentence_lookup,
+            word_text_lookup,
         )
 
     if duplicate_text_id:
         dup = texts.duplicated(subset="text_id", keep="first")
-        rows = texts.loc[dup].head(3)
+        rows = texts.loc[dup].head(1)
         examples["duplicate text_id"] = _examples(
             (f"text_id={int(r.text_id)}" for r in rows.itertuples()),
             (
@@ -258,7 +297,7 @@ def inspect_corpus(tables: CorpusTables, lang: str) -> CorpusInspection:
 
     if duplicate_sentence_id:
         dup = sentences.duplicated(subset="sentence_id", keep="first")
-        rows = sentences.loc[dup].head(3)
+        rows = sentences.loc[dup].head(1)
         examples["duplicate sentence_id"] = _examples(
             (f"sentence_id={int(r.sentence_id)}" for r in rows.itertuples()),
             (
@@ -269,7 +308,7 @@ def inspect_corpus(tables: CorpusTables, lang: str) -> CorpusInspection:
 
     if duplicate_word_id:
         dup = words.duplicated(subset="word_id", keep="first")
-        rows = words.loc[dup].head(3)
+        rows = words.loc[dup].head(1)
         examples["duplicate word_id"] = _examples(
             (f"word_id={int(r.word_id)}" for r in rows.itertuples()),
             (
@@ -282,7 +321,7 @@ def inspect_corpus(tables: CorpusTables, lang: str) -> CorpusInspection:
         dup = candidates.duplicated(
             subset=("word_id", "wordform_id", "gramset"), keep="first"
         )
-        rows = candidates.loc[dup].head(3)
+        rows = candidates.loc[dup].head(1)
         examples["duplicate candidate tuple"] = _examples(
             (
                 f"word_id={int(r.word_id)}; wordform_id={int(r.wordform_id)}; "
@@ -298,7 +337,7 @@ def inspect_corpus(tables: CorpusTables, lang: str) -> CorpusInspection:
         )
 
     if orphan_sentences_without_text:
-        rows = sentences.loc[orphan_sentences_mask].head(3)
+        rows = sentences.loc[orphan_sentences_mask].head(1)
         examples["sentences without text"] = _examples(
             (
                 f"sentence_id={int(r.sentence_id)}; text_id={int(r.text_id)}"
@@ -312,13 +351,13 @@ def inspect_corpus(tables: CorpusTables, lang: str) -> CorpusInspection:
 
     if orphan_words_without_sentence:
         examples["words without sentence"] = _word_examples(
-            words.loc[orphan_words_mask].head(3), sentence_lookup
+            words.loc[orphan_words_mask].head(1), sentence_lookup
         )
 
     if orphan_candidates_without_word:
-        rows = candidates.loc[orphan_candidates_mask].head(3)
+        rows = candidates.loc[orphan_candidates_mask].head(1)
         examples["candidates without word"] = _candidate_examples(
-            rows, word_lookup, sentence_lookup
+            rows, word_lookup, sentence_lookup, word_text_lookup
         )
 
     word_ids = set(words["word_id"])
@@ -332,6 +371,7 @@ def inspect_corpus(tables: CorpusTables, lang: str) -> CorpusInspection:
         row_words=len(words),
         row_candidates=len(candidates),
         zero_word_number=zero_word_number,
+        zero_word_number_sentences=zero_word_number_sentences,
         empty_gramset=empty_gramset,
         empty_gramset_relevance_0=empty_gramset_relevance_0,
         empty_gramset_relevance_1=empty_gramset_relevance_1,

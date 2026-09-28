@@ -114,6 +114,12 @@ def _print_examples(examples: tuple) -> None:
         print(f"  sentence_xml: {xml}")
 
 
+def _print_class_examples(examples: tuple) -> None:
+    _print_examples(examples)
+    if examples:
+        print()
+
+
 def _print_report(inspection, corpus_dir: Path) -> None:
     print(f"Language: {inspection.lang}")
     print(f"Source: {corpus_dir}/")
@@ -129,11 +135,13 @@ def _print_report(inspection, corpus_dir: Path) -> None:
     for name, count in rows.items():
         print(f"{name.ljust(width)}  rows: {count}")
     print()
+    examples = inspection.examples
     print("WARNINGS")
     print(
-        f"{'word_number=0'.ljust(width)}  words: {inspection.zero_word_number}"
+        f"word_number=0: {inspection.zero_word_number} words in "
+        f"{inspection.zero_word_number_sentences} sentences"
     )
-    _print_examples(inspection.examples.get("word_number=0", ()))
+    _print_class_examples(examples.get("word_number=0", ()))
     print(
         f"{'empty gramset'.ljust(width)}  candidate rows: {inspection.empty_gramset}"
     )
@@ -144,35 +152,32 @@ def _print_report(inspection, corpus_dir: Path) -> None:
             f"relevance=1: {inspection.empty_gramset_relevance_1}; "
             f"relevance=2: {inspection.empty_gramset_relevance_2}"
         )
-    _print_examples(inspection.examples.get("empty gramset", ()))
-    print()
+    _print_class_examples(examples.get("empty gramset", ()))
     print("DUPLICATES")
     print(f"{'text_id'.ljust(width)}: {inspection.duplicate_text_id}")
-    _print_examples(inspection.examples.get("duplicate text_id", ()))
+    _print_class_examples(examples.get("duplicate text_id", ()))
     print(f"{'sentence_id'.ljust(width)}: {inspection.duplicate_sentence_id}")
-    _print_examples(inspection.examples.get("duplicate sentence_id", ()))
+    _print_class_examples(examples.get("duplicate sentence_id", ()))
     print(f"{'word_id'.ljust(width)}: {inspection.duplicate_word_id}")
-    _print_examples(inspection.examples.get("duplicate word_id", ()))
+    _print_class_examples(examples.get("duplicate word_id", ()))
     print(f"{'candidate tuple'.ljust(width)}: {inspection.duplicate_candidate_tuple}")
-    _print_examples(inspection.examples.get("duplicate candidate tuple", ()))
-    print()
+    _print_class_examples(examples.get("duplicate candidate tuple", ()))
     print("ORPHANS")
     print(
         f"{'sentences without text'.ljust(width)}: "
         f"{inspection.orphan_sentences_without_text}"
     )
-    _print_examples(inspection.examples.get("sentences without text", ()))
+    _print_class_examples(examples.get("sentences without text", ()))
     print(
         f"{'words without sentence'.ljust(width)}: "
         f"{inspection.orphan_words_without_sentence}"
     )
-    _print_examples(inspection.examples.get("words without sentence", ()))
+    _print_class_examples(examples.get("words without sentence", ()))
     print(
         f"{'candidates without word'.ljust(width)}: "
         f"{inspection.orphan_candidates_without_word}"
     )
-    _print_examples(inspection.examples.get("candidates without word", ()))
-    print()
+    _print_class_examples(examples.get("candidates without word", ()))
     print("CANDIDATE GROUPS")
     print(f"{'words with 0 candidates'.ljust(width)}: {inspection.words_with_zero_candidates}")
     print(f"{'words with 1 candidate'.ljust(width)}: {inspection.words_with_one_candidate}")
@@ -225,6 +230,15 @@ def _print_build_summary(tag: str, results: dict[str, LanguageInstances], path: 
     print(
         f"{'ALL':<6}{totals['before']:>14}{totals['loss']:>21}"
         f"{totals['primary']:>18}{totals['texts']:>7}{totals['rows']:>15}"
+    )
+    print()
+    print(
+        "Before strict = eligible words before the final gramset check; "
+        "Empty-candidate loss = words removed because a candidate has no gramset."
+    )
+    print(
+        "Primary instances = words left for the benchmark; "
+        "Candidate rows = the analyses available for those words."
     )
     print()
     print(f"Review CSV: {path} ({written} rows)")
@@ -298,7 +312,7 @@ def _print_split_table(assignments) -> None:
         )
 
 
-def _print_split_report(tag, results, assignments, path: Path) -> None:
+def _print_split_report(tag, results, assignments, path: Path, written: bool) -> None:
     _print_benchmark_table(tag, results)
     print()
     _print_split_table(assignments)
@@ -307,7 +321,8 @@ def _print_split_report(tag, results, assignments, path: Path) -> None:
     print(
         f"Checks: text overlap = {text_overlap}; instance overlap = {instance_overlap}"
     )
-    print(f"Split: {path}")
+    status = "created" if written else "unchanged"
+    print(f"Split: {path} ({status})")
 
 
 def _run_make_splits(args: argparse.Namespace) -> int:
@@ -341,11 +356,11 @@ def _run_make_splits(args: argparse.Namespace) -> int:
         rows = build_split_rows(assignments)
         content = split_csv_bytes(rows)
         path = split_csv_path(output_dir, tag)
-        write_split_csv(path, content)
+        written = write_split_csv(path, content)
     except (CorpusTagError, DataError, SplitError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    _print_split_report(tag, results, assignments, path)
+    _print_split_report(tag, results, assignments, path, written)
     return 0
 
 
