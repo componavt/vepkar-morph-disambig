@@ -405,18 +405,21 @@ def test_cli_make_splits_full_run(tmp_path):
         in result.stdout
     )
     assert "Checks: text overlap = 0; instance overlap = 0" in result.stdout
-    assert f"Split: {out_dir / 'splits_v2026.09.csv'}" in result.stdout
-    assert "Δ" not in result.stdout
     target = split_csv_path(out_dir, TAG)
+    assert f"Split: {target} (created)" in result.stdout
+    assert "Δ" not in result.stdout
     assert target.is_file()
     first_lines = target.read_text(encoding="utf-8").splitlines()
     assert first_lines[0] == "language,text_id,split"
     assert len(first_lines) == 25  # header + 6 texts x 4 languages
+    mtime_before = target.stat().st_mtime_ns
     second = _run_cli(
         "make-splits", "--data-dir", str(checkout), "--output-dir", str(out_dir)
     )
     assert second.returncode == 0, second.stderr
+    assert f"Split: {target} (unchanged)" in second.stdout
     assert target.read_text(encoding="utf-8").splitlines() == first_lines
+    assert target.stat().st_mtime_ns == mtime_before
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
@@ -431,6 +434,21 @@ def test_cli_build_instances_compact_output(tmp_path):
     assert "Source tag:" not in result.stdout
     assert "BENCHMARK — dictorpus-data v2026.09" in result.stdout
     assert "Empty-candidate loss" in result.stdout
+    assert result.stdout.count(
+        "Before strict = eligible words before the final gramset check; "
+        "Empty-candidate loss = words removed because a candidate has no gramset."
+    ) == 1
+    assert result.stdout.count(
+        "Primary instances = words left for the benchmark; "
+        "Candidate rows = the analyses available for those words."
+    ) == 1
+    assert (
+        result.stdout.index("Before strict = eligible words")
+        > result.stdout.index("BENCHMARK — dictorpus-data v2026.09")
+    )
+    assert result.stdout.index("Review CSV:") > result.stdout.index(
+        "Primary instances = words left for the benchmark"
+    )
     for lang in ("vep", "krl", "olo", "lud"):
         assert f"  {lang}  OK" in result.stderr
     review = out_dir / "zero_word_number_sentences_v2026.09.csv"
