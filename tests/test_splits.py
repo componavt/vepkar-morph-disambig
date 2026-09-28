@@ -1,8 +1,10 @@
 """Offline tests for whole-text weighted splits and the shared split CSV."""
 
+import argparse
 import csv
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,7 @@ from core.splits import (  # noqa: E402
     design_text_weights,
     split_csv_bytes,
     split_csv_path,
+    validate_split_assignments,
     write_split_csv,
 )
 
@@ -96,15 +99,18 @@ def test_text_id_across_languages_rejected():
 
 
 def test_same_input_identical_assignment_and_csv_bytes():
-    weights = design_text_weights(
+    all_weights = design_text_weights(
         [(lang, text_id, 2, 4) for lang in ("vep", "krl", "olo", "lud") for text_id in range(1, 9)]
     )
-    first = {
-        lang: assign_texts(weights) for lang in ("vep", "krl", "olo", "lud")
-    }
-    second = {
-        lang: assign_texts(weights) for lang in ("vep", "krl", "olo", "lud")
-    }
+    first: dict[str, dict[str, tuple[TextWeight, ...]]] = {}
+    second: dict[str, dict[str, tuple[TextWeight, ...]]] = {}
+    for language in ("vep", "krl", "olo", "lud"):
+        language_weights = tuple(
+            weight for weight in all_weights
+            if weight.language == language
+        )
+        first[language] = assign_texts(language_weights)
+        second[language] = assign_texts(language_weights)
     assert first == second
     assert split_csv_bytes(build_split_rows(first)) == split_csv_bytes(
         build_split_rows(second)
@@ -166,6 +172,83 @@ def test_each_instance_inherits_exactly_one_split():
     assert set(split_of_text) == {1, 2}
     for instance in instances:
         assert split_of_text[instance.text_id] in SPLIT_NAMES
+
+
+def _krl_parts() -> tuple[dict[str, dict[str, tuple[TextWeight, ...]]], tuple[TextWeight, ...]]:
+    weights = design_text_weights([("krl", text_id, 2, 4) for text_id in range(1, 6)])
+    assignment = assign_texts(weights)
+    parts = {"krl": {part: tuple(assignment[part]) for part in SPLIT_NAMES}}
+    return parts, weights
+
+
+def test_validate_accepts_consistent_assignments():
+    assignments, weights = _krl_parts()
+    validate_split_assignments(assignments, weights)
+
+
+def test_validate_rejects_text_assigned_to_train_and_test():
+    assignments, weights = _krl_parts()
+    moved = assignments["krl"]["train"][0]
+    assignments["krl"]["test"] = assignments["krl"]["test"] + (moved,)
+    with pytest.raises(SplitError, match="more than once"):
+        validate_split_assignments(assignments, weights)
+
+
+def test_validate_rejects_text_repeated_within_part():
+    assignments, weights = _krl_parts()
+    repeated = assignments["krl"]["train"][0]
+    assignments["krl"]["train"] = assignments["krl"]["train"] + (repeated,)
+    with pytest.raises(SplitError, match="more than once"):
+        validate_split_assignments(assignments, weights)
+
+
+def test_validate_rejects_omitted_text():
+    assignments, weights = _krl_parts()
+    assignments["krl"]["train"] = assignments["krl"]["train"][1:]
+    with pytest.raises(SplitError, match="no split assignment"):
+        validate_split_assignments(assignments, weights)
+
+
+def test_validate_rejects_unknown_added_text():
+    assignments, weights = _krl_parts()
+    assignments["krl"]["train"] = assignments["krl"]["train"] + (
+        TextWeight("krl", 99, 1, 2),
+    )
+    with pytest.raises(SplitError, match="Unexpected assigned text"):
+        validate_split_assignments(assignments, weights)
+
+
+def test_validate_rejects_modified_assigned_weight():
+    assignments, weights = _krl_parts()
+    first = assignments["krl"]["train"][0]
+    changed = replace(first, instance_count=first.instance_count + 10)
+    assignments["krl"]["train"] = (changed,) + assignments["krl"]["train"][1:]
+    with pytest.raises(SplitError, match="weight changed"):
+        validate_split_assignments(assignments, weights)
+
+
+def test_build_split_rows_rejects_conflicting_parts():
+    assignments = {
+        "krl": {
+            "train": (TextWeight("krl", 1, 2, 4),),
+            "test": (TextWeight("krl", 1, 2, 4),),
+        }
+    }
+    with pytest.raises(SplitError, match="more than once"):
+        build_split_rows(assignments)
+
+
+def test_build_split_rows_rejects_repeated_within_part():
+    assignments = {
+        "krl": {
+            "train": (
+                TextWeight("krl", 1, 2, 4),
+                TextWeight("krl", 1, 2, 4),
+            ),
+        }
+    }
+    with pytest.raises(SplitError, match="more than once"):
+        build_split_rows(assignments)
 
 
 def _probe_rows() -> tuple[tuple[str, int, str], ...]:
@@ -354,6 +437,37 @@ def test_cli_build_instances_compact_output(tmp_path):
     assert review.is_file()
     corpus_files = sorted(p.name for p in (checkout / "corpus").iterdir())
     assert len(corpus_files) == 16
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_failed_integrity_check_writes_no_split_csv(tmp_path, monkeypatch, capsys):
+    import cli as cli_pkg
+
+    checkout = _tagged_checkout(tmp_path)
+    out_dir = tmp_path / "derived"
+    real_assign = cli_pkg.assign_texts
+
+    def conflicting_assign(lang_weights):
+        result = real_assign(lang_weights)
+        if not result["train"]:
+            return result
+        repeated = result["train"][0]
+        return {
+            part: (result[part] + (repeated,) if part == "test" else result[part])
+            for part in SPLIT_NAMES
+        }
+
+    monkeypatch.setattr(cli_pkg, "assign_texts", conflicting_assign)
+    status = cli_pkg._run_make_splits(
+        argparse.Namespace(data_dir=checkout, output_dir=out_dir)
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "error:" in captured.err
+    assert "Checks:" not in captured.out
+    assert "BENCHMARK" not in captured.out
+    assert "SPLIT" not in captured.out
+    assert not split_csv_path(out_dir, TAG).exists()
 
 
 def test_cli_help_has_no_verbose_flag():
