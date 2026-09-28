@@ -260,12 +260,17 @@ def test_cli_inspect_data_succeeds_on_fixture(tmp_path):
 
 
 def test_cli_inspect_data_fails_when_dataset_absent(tmp_path):
-    result = _run_cli("inspect-data", "krl", "--data-dir", str(tmp_path / "missing"))
-    assert result.returncode != 0
-    assert "not found" in result.stderr.lower()
+    missing = tmp_path / "missing"
+    result = _run_cli("inspect-data", "krl", "--data-dir", str(missing))
+    assert result.returncode == 1
+    assert "dictorpus-data" in result.stderr
+    assert str(missing) in result.stderr
+    assert "fetch-data" not in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_cli_inspect_data_rejects_unknown_language(tmp_path):
+    build_fixture(tmp_path)
     result = _run_cli("inspect-data", "eng", "--data-dir", str(tmp_path))
     assert result.returncode != 0
     assert "Unsupported language" in result.stderr

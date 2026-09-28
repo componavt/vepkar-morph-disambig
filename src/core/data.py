@@ -67,6 +67,39 @@ def resolve_data_dir(data_dir: Path | None) -> Path:
     return Path(data_dir)
 
 
+def require_local_corpus(data_dir: Path) -> Path:
+    """Return the corpus directory or raise a helpful data-access error.
+
+    Offers the manual fetch command for the default checkout location and
+    identifies a supplied custom ``--data-dir`` without promising that the
+    fetch command will populate it.
+    """
+    checkout = Path(data_dir)
+    corpus = checkout / "corpus"
+
+    if not checkout.is_dir():
+        if checkout == DEFAULT_DATA_DIR:
+            raise DataError(
+                f"Local dictorpus-data checkout is missing: {checkout}\n"
+                "When you are ready to fetch it, run:\n"
+                "  python src/cli.py fetch-data v2026.09"
+            )
+        raise DataError(
+            f"Local dictorpus-data checkout is missing: {checkout}\n"
+            "Supply an existing checkout via --data-dir; the recorded fetch "
+            "command populates the project's default location "
+            "(data/dictorpus-data)."
+        )
+
+    if not corpus.is_dir():
+        raise DataError(
+            f"Local dictorpus-data checkout has no corpus/ directory: {checkout}\n"
+            "Check the supplied --data-dir or obtain the complete source checkout."
+        )
+
+    return corpus
+
+
 def _table_path(stem: str, data_dir: Path | None) -> Path:
     return resolve_data_dir(data_dir) / "corpus" / f"{stem}.csv.zst"
 

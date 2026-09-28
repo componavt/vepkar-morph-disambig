@@ -19,6 +19,7 @@ from core.data import (  # noqa: E402
     read_sentences,
     read_texts,
     read_words,
+    require_local_corpus,
 )
 
 TEXT_COLS = ["text_id", "corpus_id", "dialect_code", "genre_id", "year_recorded"]
@@ -247,3 +248,26 @@ def test_missing_source_file_rejected(tmp_path):
     (tmp_path / "corpus" / "texts_krl.csv.zst").unlink()
     with pytest.raises(DataError, match="not found"):
         read_texts("krl", tmp_path)
+
+
+def test_require_local_corpus_missing_custom_path(tmp_path):
+    missing = tmp_path / "missing-dictorpus-data"
+    with pytest.raises(DataError) as excinfo:
+        require_local_corpus(missing)
+    message = str(excinfo.value)
+    assert "dictorpus-data" in message
+    assert str(missing) in message
+    assert "fetch-data" not in message
+
+
+def test_require_local_corpus_reports_missing_corpus(tmp_path):
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    with pytest.raises(DataError, match="no corpus"):
+        require_local_corpus(checkout)
+
+
+def test_require_local_corpus_returns_corpus(tmp_path):
+    checkout = tmp_path / "checkout"
+    (checkout / "corpus").mkdir(parents=True)
+    assert require_local_corpus(checkout) == checkout / "corpus"

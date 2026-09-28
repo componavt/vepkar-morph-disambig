@@ -165,13 +165,126 @@ def build_split_rows(
     assignments: dict[str, dict[str, tuple[TextWeight, ...]]]
 ) -> tuple[tuple[str, int, str], ...]:
     """Flatten per-language assignments into sorted ``(language, text_id,
-    split)`` rows."""
-    rows: set[tuple[str, int, str]] = set()
+    split)`` rows; a text assigned more than once is rejected."""
+    rows: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int]] = set()
     for language in assignments:
         for part in SPLIT_NAMES:
-            for weight in assignments[language][part]:
-                rows.add((language, weight.text_id, part))
+            for weight in assignments[language].get(part, ()):
+                key = (language, weight.text_id)
+                if key in seen:
+                    raise SplitError(f"Text assigned more than once: {key}")
+                seen.add(key)
+                rows.append((language, weight.text_id, part))
     return tuple(sorted(rows, key=lambda row: (row[0], row[1])))
+
+
+def _weight_totals(weights: Iterable[TextWeight]) -> tuple[int, int]:
+    instances = sum(weight.instance_count for weight in weights)
+    candidates = sum(weight.candidate_row_count for weight in weights)
+    return instances, candidates
+
+
+def validate_split_assignments(
+    assignments: dict[str, dict[str, tuple[TextWeight, ...]]],
+    expected_weights: tuple[TextWeight, ...],
+) -> None:
+    """Validate whole-text split assignments against the accepted weights.
+
+    Every accepted text must be assigned to exactly one of ``train``, ``dev``,
+    ``test`` with unchanged weights; per-language and overall instance and
+    candidate-row totals must be conserved.  Raises :class:`SplitError` on the
+    first violation.
+    """
+    expected_by_key = {
+        (weight.language, weight.text_id): weight for weight in expected_weights
+    }
+    expected_by_language: dict[str, tuple[int, int]] = {}
+    for weight in expected_weights:
+        instances, candidates = expected_by_language.setdefault(
+            weight.language, (0, 0)
+        )
+        expected_by_language[weight.language] = (
+            instances + weight.instance_count,
+            candidates + weight.candidate_row_count,
+        )
+
+    seen: dict[tuple[str, int], str] = {}
+    for language, parts in assignments.items():
+        unknown = sorted(set(parts) - set(SPLIT_NAMES))
+        if unknown:
+            raise SplitError(
+                f"Unknown split part in {language}: {', '.join(unknown)}"
+            )
+        for split in SPLIT_NAMES:
+            for weight in parts.get(split, ()):
+                key = (weight.language, weight.text_id)
+                if weight.language != language:
+                    raise SplitError(f"Language mismatch in assignment: {key}")
+                if key in seen:
+                    raise SplitError(
+                        f"Text assigned more than once: {key} "
+                        f"({seen[key]} and {split})"
+                    )
+                if key not in expected_by_key:
+                    raise SplitError(f"Unexpected assigned text: {key}")
+                if weight != expected_by_key[key]:
+                    raise SplitError(f"Assigned text weight changed: {key}")
+                seen[key] = split
+
+    missing = sorted(set(expected_by_key) - set(seen))
+    if missing:
+        raise SplitError(
+            "Some accepted texts have no split assignment: "
+            f"{missing[0]}{' and more' if len(missing) > 1 else ''}"
+        )
+
+    for language, total in expected_by_language.items():
+        assigned = [
+            weight
+            for split in SPLIT_NAMES
+            for weight in assignments.get(language, {}).get(split, ())
+        ]
+        if _weight_totals(assigned) != total:
+            raise SplitError(
+                f"Assigned instance or candidate totals changed for {language}: "
+                f"got {_weight_totals(assigned)}, expected {total}"
+            )
+    all_assigned = [
+        weight
+        for language in assignments
+        for split in SPLIT_NAMES
+        for weight in assignments[language].get(split, ())
+    ]
+    if _weight_totals(all_assigned) != _weight_totals(expected_weights):
+        raise SplitError(
+            "Assigned instance or candidate totals changed overall: got "
+            f"{_weight_totals(all_assigned)}, expected "
+            f"{_weight_totals(expected_weights)}"
+        )
+
+
+def split_overlap_counts(
+    assignments: dict[str, dict[str, tuple[TextWeight, ...]]]
+) -> tuple[int, int]:
+    """Return ``(texts, instances)`` assigned to more than one split part."""
+    parts_by_key: dict[tuple[str, int], set[str]] = {}
+    for language, parts in assignments.items():
+        for split in SPLIT_NAMES:
+            for weight in parts.get(split, ()):
+                parts_by_key.setdefault((language, weight.text_id), set()).add(split)
+    overlapping = {
+        key for key, parts in parts_by_key.items() if len(parts) > 1
+    }
+    text_overlap = len(overlapping)
+    instance_overlap = sum(
+        weight.instance_count
+        for language, parts in assignments.items()
+        for split in SPLIT_NAMES
+        for weight in parts.get(split, ())
+        if (language, weight.text_id) in overlapping
+    )
+    return text_overlap, instance_overlap
 
 
 def split_csv_bytes(rows: Iterable[tuple[str, int, str]]) -> bytes:

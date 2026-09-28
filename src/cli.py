@@ -12,6 +12,7 @@ from core.data import (
     SUPPORTED_LANGUAGES,
     DataError,
     read_corpus_tables,
+    require_local_corpus,
     resolve_data_dir,
 )
 from core.fetch import FetchError, fetch_data
@@ -34,6 +35,8 @@ from core.splits import (
     compute_text_weights,
     split_csv_bytes,
     split_csv_path,
+    split_overlap_counts,
+    validate_split_assignments,
     write_split_csv,
 )
 from core.validation import CorpusError, inspect_corpus
@@ -300,7 +303,10 @@ def _print_split_report(tag, results, assignments, path: Path) -> None:
     print()
     _print_split_table(assignments)
     print()
-    print("Checks: text overlap = 0; instance overlap = 0")
+    text_overlap, instance_overlap = split_overlap_counts(assignments)
+    print(
+        f"Checks: text overlap = {text_overlap}; instance overlap = {instance_overlap}"
+    )
     print(f"Split: {path}")
 
 
@@ -310,6 +316,7 @@ def _run_make_splits(args: argparse.Namespace) -> int:
         args.output_dir if args.output_dir is not None else DEFAULT_SPLIT_OUTPUT_DIR
     )
     try:
+        require_local_corpus(data_dir)
         tag = determine_data_tag(data_dir)
         results: dict[str, LanguageInstances] = {}
         all_instances = []
@@ -330,6 +337,7 @@ def _run_make_splits(args: argparse.Namespace) -> int:
                 weight for weight in weights if weight.language == lang
             )
             assignments[lang] = assign_texts(lang_weights)
+        validate_split_assignments(assignments, weights)
         rows = build_split_rows(assignments)
         content = split_csv_bytes(rows)
         path = split_csv_path(output_dir, tag)
@@ -355,6 +363,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "inspect-data":
         data_dir = args.data_dir if args.data_dir is not None else DEFAULT_DATA_DIR
         try:
+            require_local_corpus(data_dir)
             tables = read_corpus_tables(args.language, data_dir)
             inspection = inspect_corpus(tables, args.language)
         except (DataError, CorpusError) as exc:
@@ -365,8 +374,9 @@ def main(argv: list[str] | None = None) -> int:
         data_dir = resolve_data_dir(args.data_dir)
         output_dir = args.output_dir if args.output_dir is not None else DEFAULT_OUTPUT_DIR
         try:
+            require_local_corpus(data_dir)
             tag = determine_data_tag(data_dir)
-        except CorpusTagError as exc:
+        except (CorpusTagError, DataError) as exc:
             parser.exit(1, f"error: {exc}\n")
         results = {}
         for lang in SUPPORTED_LANGUAGES:
