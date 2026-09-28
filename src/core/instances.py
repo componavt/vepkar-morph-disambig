@@ -2,9 +2,11 @@
 
 Each instance is one occurrence of a corpus word (its ``word_id``) together
 with the distinct candidate morphological analyses and exactly one
-expert-selected ``relevance == 2`` analysis.  The sequential eligibility
-funnel, overlap diagnostics, and the developer sentence-review pairs are
-computed from the typed corpus tables without modifying the source checkout.
+expert-selected ``relevance == 2`` analysis.  A word occurrence is eligible
+only when every one of its candidates has a nonempty ``gramset``.  The
+sequential eligibility funnel, overlap diagnostics, and the developer
+sentence-review pairs are computed from the typed corpus tables without
+modifying the source checkout.
 """
 
 from __future__ import annotations
@@ -36,7 +38,13 @@ _FUNNEL_NAMES = (
     "selected analysis has nonempty gramset",
     "sentence and text uniquely identified",
     "sentence positions unique and positive",
+    "every candidate has a nonempty gramset",
 )
+
+
+def has_empty_candidate_gramset(candidates: tuple[Candidate, ...]) -> bool:
+    """True when at least one candidate of a word occurrence has an empty gramset."""
+    return any(candidate.gramset == "" for candidate in candidates)
 
 
 class CorpusTagError(Exception):
@@ -91,13 +99,6 @@ class LanguageInstances:
     step1_words_with_unavailable_sentence: int
     step1_words_with_zero_position_sentence: int
     step1_words_with_repeated_position_sentence: int
-    primary_words_with_unselected_empty_gramset: int
-
-    @property
-    def alternative_primary_pool_size(self) -> int:
-        """Primary pool size if entire words with unselected empty gramsets
-        were excluded.  Diagnostic only; the primary pool is not changed."""
-        return len(self.instances) - self.primary_words_with_unselected_empty_gramset
 
 
 def determine_data_tag(data_dir: Path) -> str:
@@ -233,9 +234,16 @@ def build_language_instances(language: str, tables: CorpusTables) -> LanguageIns
         for word_id in step5
         if word_sentence[word_id] not in invalid_sentence_ids
     }
+    empty_candidate_words = set(
+        int(word_id)
+        for word_id in candidates.loc[candidates["gramset"] == "", "word_id"].unique()
+    )
+    step7 = {word_id for word_id in step6 if word_id not in empty_candidate_words}
 
     funnel: list[FunnelStep] = [FunnelStep(0, _FUNNEL_NAMES[0], len(step0), 0)]
-    funnel_sets = [step0, step1, step2, step3, step4, step5, step6]
+    funnel_sets = [
+        step0, step1, step2, step3, step4, step5, step6, step7,
+    ]
     for index in range(1, len(funnel_sets)):
         retained = len(funnel_sets[index])
         removed = len(funnel_sets[index - 1]) - retained
@@ -261,13 +269,10 @@ def build_language_instances(language: str, tables: CorpusTables) -> LanguageIns
         for word_id in step1
         if word_sentence[word_id] in repeated_position_sentences
     )
-    primary_words_with_unselected_empty_gramset = sum(
-        1 for word_id in step6 if unselected_empty_counts.get(word_id, 0) >= 1
-    )
 
-    final_rows = candidates[candidates["word_id"].isin(step6)]
+    final_rows = candidates[candidates["word_id"].isin(step7)]
     instances: list[Instance] = []
-    for word_id in sorted(step6):
+    for word_id in sorted(step7):
         word_rows = final_rows[final_rows["word_id"] == word_id]
         identities = sorted(
             {
@@ -299,6 +304,7 @@ def build_language_instances(language: str, tables: CorpusTables) -> LanguageIns
             )
         )
 
+    assert len(instances) == len(step7)
     return LanguageInstances(
         language=language,
         funnel=tuple(funnel),
@@ -311,7 +317,6 @@ def build_language_instances(language: str, tables: CorpusTables) -> LanguageIns
         step1_words_with_unavailable_sentence=step1_words_with_unavailable_sentence,
         step1_words_with_zero_position_sentence=step1_words_with_zero_position_sentence,
         step1_words_with_repeated_position_sentence=step1_words_with_repeated_position_sentence,
-        primary_words_with_unselected_empty_gramset=primary_words_with_unselected_empty_gramset,
     )
 
 

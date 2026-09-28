@@ -28,6 +28,7 @@ from core.instances import (  # noqa: E402
     Instance,
     build_language_instances,
     determine_data_tag,
+    has_empty_candidate_gramset,
     review_csv_path,
     write_review_csv,
 )
@@ -129,16 +130,70 @@ def test_selected_candidate_with_empty_gramset_excludes_word(tmp_path):
     assert result.instances == ()
 
 
-def test_unselected_empty_gramset_stays_in_primary_pool(tmp_path):
+def test_unselected_empty_gramset_removed_at_step7(tmp_path):
     words = [(100, 10, 1, "tere")]
     candidates = [(100, 9001, "", 1), (100, 9002, "SG+ACC", 2)]
     result = build_language_instances("krl", build(tmp_path, words, candidates))
     assert result.funnel[6].retained == 1
-    instance = result.instances[0]
-    assert instance.candidates == (Candidate(9001, ""), Candidate(9002, "SG+ACC"))
-    assert instance.gold_analysis == Candidate(9002, "SG+ACC")
-    assert result.primary_words_with_unselected_empty_gramset == 1
-    assert result.alternative_primary_pool_size == 0
+    assert result.funnel[7].retained == 0
+    assert result.funnel[7].removed == 1
+    assert result.instances == ()
+    assert result.step1_words_with_unselected_empty_gramset == 1
+
+
+def test_selected_empty_gramset_not_recounted_at_step7(tmp_path):
+    words = [(100, 10, 1, "tere"), (101, 11, 1, "ok")]
+    candidates = [
+        (100, 9001, "", 2), (100, 9002, "SG+GEN", 1),
+        (101, 9003, "A", 1), (101, 9004, "B", 2),
+    ]
+    result = build_language_instances("krl", build(tmp_path, words, candidates))
+    assert result.funnel[4].retained == 1
+    assert result.funnel[6].retained == 1
+    assert result.funnel[7].retained == 1
+    assert result.funnel[7].removed == 0
+    assert [inst.word_id for inst in result.instances] == [101]
+
+
+def test_clean_instance_keeps_full_candidate_tuple(tmp_path):
+    words = [(100, 10, 1, "tere")]
+    candidates = [
+        (100, 9001, "SG+ACC", 1),
+        (100, 9002, "SG+NOM", 2),
+        (100, 9003, "SG+GEN", 1),
+    ]
+    result = build_language_instances("krl", build(tmp_path, words, candidates))
+    assert result.funnel[6].retained == 1
+    assert result.funnel[7].retained == 1
+    assert len(result.instances) == result.funnel[7].retained
+    assert result.instances[0].candidates == (
+        Candidate(9001, "SG+ACC"),
+        Candidate(9002, "SG+NOM"),
+        Candidate(9003, "SG+GEN"),
+    )
+    assert result.instances[0].gold_analysis == Candidate(9002, "SG+NOM")
+
+
+def test_step7_removed_equals_step6_minus_step7(tmp_path):
+    words = [(100, 10, 1, "a"), (101, 11, 1, "b"), (102, 12, 1, "c")]
+    candidates = [
+        (100, 9001, "", 1), (100, 9002, "SG+ACC", 2),
+        (101, 9003, "A", 1), (101, 9004, "B", 2),
+        (102, 9005, "C", 1), (102, 9006, "D", 2),
+    ]
+    result = build_language_instances("krl", build(tmp_path, words, candidates))
+    assert result.funnel[7].removed == result.funnel[6].retained - result.funnel[7].retained
+    assert len(result.instances) == result.funnel[7].retained
+    assert [inst.word_id for inst in result.instances] == [101, 102]
+
+
+def test_has_empty_candidate_gramset():
+    assert not has_empty_candidate_gramset(
+        (Candidate(1, "A"), Candidate(2, "B"))
+    )
+    assert has_empty_candidate_gramset(
+        (Candidate(1, "A"), Candidate(2, ""))
+    )
 
 
 def test_zero_position_word_excludes_whole_sentence(tmp_path):
@@ -253,11 +308,11 @@ def test_funnel_monotonic_and_removed_consistent(tmp_path):
     ]
     result = build_language_instances("krl", build(tmp_path, words, candidates))
     retained = [step.retained for step in result.funnel]
-    assert [step.index for step in result.funnel] == list(range(7))
+    assert [step.index for step in result.funnel] == list(range(8))
     assert retained == sorted(retained, reverse=True)
     for index in range(1, len(retained)):
         assert result.funnel[index].removed == retained[index - 1] - retained[index]
-    assert retained[6] == 1
+    assert retained[7] == 1
     assert result.instances[0].word_id == 100
 
 
