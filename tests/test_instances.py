@@ -363,6 +363,57 @@ def test_instances_are_materialized_for_surviving_words(tmp_path):
     assert [inst.language for inst in result.instances] == ["krl", "krl"]
 
 
+def test_grouped_materialization_unsorted_source_rows(tmp_path):
+    words = [
+        (100, 10, 1, "tere"),
+        (102, 12, 1, "kolmas"),
+        (101, 11, 1, "teine"),
+    ]
+    candidates = [
+        (102, 9011, "SG+ACC", 1),
+        (102, 9011, "SG+NOM", 2),
+        (102, 9012, "SG+GEN", 1),
+        (100, 9001, "SG+NOM", 2),
+        (100, 9001, "SG+ACC", 1),
+        (100, 9002, "SG+GEN", 1),
+        (101, 9005, "A", 1),
+        (101, 9006, "B", 1),
+    ]
+    result = build_language_instances("krl", build(tmp_path, words, candidates))
+    assert result.funnel[7].retained == 2
+    assert [inst.word_id for inst in result.instances] == [100, 102]
+    expected = [
+        (
+            100,
+            10,
+            1,
+            "tere",
+            '<s id="10"><w id="1">one</w></s>',
+            (Candidate(9001, "SG+ACC"), Candidate(9001, "SG+NOM"), Candidate(9002, "SG+GEN")),
+            Candidate(9001, "SG+NOM"),
+        ),
+        (
+            102,
+            12,
+            1,
+            "kolmas",
+            '<s id="12"><w id="3">three</w></s>',
+            (Candidate(9011, "SG+ACC"), Candidate(9011, "SG+NOM"), Candidate(9012, "SG+GEN")),
+            Candidate(9011, "SG+NOM"),
+        ),
+    ]
+    for instance, (word_id, sentence_id, text_id, word, xml, candidates_expected, gold) in zip(
+        result.instances, expected
+    ):
+        assert instance.word_id == word_id
+        assert instance.sentence_id == sentence_id
+        assert instance.text_id == text_id
+        assert instance.word == word
+        assert instance.sentence_xml == xml
+        assert instance.candidates == candidates_expected
+        assert instance.gold_analysis == gold
+
+
 def test_determine_data_tag_requires_git_checkout(tmp_path):
     repo = tmp_path / "checkout"
     repo.mkdir()

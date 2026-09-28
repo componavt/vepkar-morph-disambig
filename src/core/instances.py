@@ -270,10 +270,14 @@ def build_language_instances(language: str, tables: CorpusTables) -> LanguageIns
         if word_sentence[word_id] in repeated_position_sentences
     )
 
-    final_rows = candidates[candidates["word_id"].isin(step7)]
+    final_rows = candidates.loc[candidates["word_id"].isin(step7)]
     instances: list[Instance] = []
-    for word_id in sorted(step7):
-        word_rows = final_rows[final_rows["word_id"] == word_id]
+    materialized_word_ids: set[int] = set()
+
+    for word_id, word_rows in final_rows.groupby("word_id", sort=True):
+        word_id = int(word_id)
+        materialized_word_ids.add(word_id)
+
         identities = sorted(
             {
                 (int(r.wordform_id), r.gramset)
@@ -304,7 +308,12 @@ def build_language_instances(language: str, tables: CorpusTables) -> LanguageIns
             )
         )
 
-    assert len(instances) == len(step7)
+    if materialized_word_ids != set(step7):
+        missing = sorted(set(step7) - materialized_word_ids)
+        raise RuntimeError(
+            "instance materialization omits accepted word_ids: "
+            f"{missing}"
+        )
     return LanguageInstances(
         language=language,
         funnel=tuple(funnel),
