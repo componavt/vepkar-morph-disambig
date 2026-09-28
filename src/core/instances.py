@@ -129,6 +129,23 @@ def determine_data_tag(data_dir: Path) -> str:
     return tags[0]
 
 
+def _ensure_materialized_word_ids(
+    expected_word_ids: set[int],
+    materialized_word_ids: set[int],
+) -> None:
+    missing = sorted(expected_word_ids - materialized_word_ids)
+    if not missing:
+        return
+
+    preview = ", ".join(str(word_id) for word_id in missing[:10])
+    suffix = " ..." if len(missing) > 10 else ""
+
+    raise RuntimeError(
+        "Instance materialization omitted "
+        f"{len(missing)} accepted word_id values: {preview}{suffix}"
+    )
+
+
 def build_language_instances(language: str, tables: CorpusTables) -> LanguageInstances:
     """Build instances and all funnel diagnostics for one language variety."""
     words, sentences, texts, candidates = (
@@ -308,12 +325,7 @@ def build_language_instances(language: str, tables: CorpusTables) -> LanguageIns
             )
         )
 
-    if materialized_word_ids != set(step7):
-        missing = sorted(set(step7) - materialized_word_ids)
-        raise RuntimeError(
-            "instance materialization omits accepted word_ids: "
-            f"{missing}"
-        )
+    _ensure_materialized_word_ids(set(step7), materialized_word_ids)
     return LanguageInstances(
         language=language,
         funnel=tuple(funnel),
