@@ -1,5 +1,6 @@
 """Offline tests for the pure prediction-file validator."""
 
+import csv
 import sys
 from pathlib import Path
 
@@ -10,7 +11,11 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from core.instances import Candidate, Instance  # noqa: E402
-from core.predictions import validate_predictions  # noqa: E402
+from core.predictions import (  # noqa: E402
+    PredictionCsvParseError,
+    PredictionFileReadError,
+    validate_predictions,
+)
 
 SPLIT_ROWS = (
     ("krl", 1, "train"),
@@ -325,3 +330,77 @@ def test_invalid_wordform_id(tmp_path, value):
     result = validate_predictions(path, "train", [INSTANCE_501], SPLIT_ROWS)
     assert not result.is_valid
     assert "invalid wordform_id" in result.errors
+
+
+def test_unreadable_predictions_path(tmp_path):
+    missing_path = tmp_path / "does-not-exist.csv"
+
+    with pytest.raises(PredictionFileReadError) as raised:
+        validate_predictions(
+            missing_path,
+            "train",
+            TRAIN_INSTANCES,
+            SPLIT_ROWS,
+        )
+
+    assert "cannot read predictions file" in str(raised.value)
+    assert str(missing_path) in str(raised.value)
+    assert isinstance(raised.value.__cause__, FileNotFoundError)
+
+
+def test_directory_instead_of_predictions_file(tmp_path):
+    with pytest.raises(PredictionFileReadError) as raised:
+        validate_predictions(
+            tmp_path,
+            "train",
+            TRAIN_INSTANCES,
+            SPLIT_ROWS,
+        )
+
+    assert isinstance(raised.value.__cause__, IsADirectoryError)
+
+
+def test_malformed_csv_syntax(tmp_path):
+    path = tmp_path / "predictions.csv"
+    path.write_text(
+        'word_id,wordform_id,gramset,rank,score\n'
+        '501,9001,"SG+NOM,1,125\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PredictionCsvParseError) as raised:
+        validate_predictions(
+            path,
+            "train",
+            TRAIN_INSTANCES,
+            SPLIT_ROWS,
+        )
+
+    assert "cannot parse predictions CSV" in str(raised.value)
+    assert str(path) in str(raised.value)
+    assert isinstance(raised.value.__cause__, csv.Error)
+
+
+def test_duplicate_benchmark_word_id(tmp_path):
+    duplicate_instances = (
+        _instance(501, 1, TRAIN[501]),
+        Instance(
+            language="vep",
+            word_id=501,
+            sentence_id=999,
+            text_id=999,
+            word="duplicate",
+            word_number=1,
+            sentence_xml="<s/>",
+            candidates=TRAIN,
+            gold_analysis=TRAIN,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="duplicate word_id"):
+        validate_predictions(
+            tmp_path / "not-opened.csv",
+            "train",
+            duplicate_instances,
+            SPLIT_ROWS,
+        )
