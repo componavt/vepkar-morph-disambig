@@ -1,3 +1,4 @@
+import argparse
 import csv
 import subprocess
 import sys
@@ -264,14 +265,185 @@ def test_validate_predictions_missing_predictions_file(tmp_path):
     instances = _strict_instances(checkout)
     split_file = tmp_path / "splits_dev.csv"
     _write_split_fixture(split_file, instances, "dev")
+    missing = tmp_path / "missing.csv"
     result = run_cli(
         "validate-predictions",
-        "--predictions", str(tmp_path / "missing.csv"),
+        "--predictions", str(missing),
         "--split", "dev",
         "--data-dir", str(checkout),
         "--split-file", str(split_file),
     )
     assert result.returncode == 1
-    assert "error:" in result.stderr
     assert "cannot read predictions file" in result.stderr
+    assert str(missing) in result.stderr
+    assert "Predictions validation: OK" not in result.stdout
+    assert "Predictions validation: FAILED" not in result.stdout
     assert "Traceback" not in result.stderr
+    assert "Traceback" not in result.stdout
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_directory_path(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_fixture(split_file, instances, "dev")
+    directory = tmp_path / "predictions_dir"
+    directory.mkdir()
+    result = run_cli(
+        "validate-predictions",
+        "--predictions", str(directory),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "cannot read predictions file" in result.stderr
+    assert str(directory) in result.stderr
+    assert "Errno" in result.stderr
+    assert "Predictions validation" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_malformed_csv(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_fixture(split_file, instances, "dev")
+    predictions = tmp_path / "malformed.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n"
+        '501,9001,"SG+NOM,1,125\n',
+        encoding="utf-8",
+    )
+    result = run_cli(
+        "validate-predictions",
+        "--predictions", str(predictions),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "cannot parse predictions CSV" in result.stderr
+    assert str(predictions) in result.stderr
+    assert "OK" not in result.stdout
+    assert "FAILED" not in result.stdout
+    assert "Traceback" not in result.stderr
+    assert "Traceback" not in result.stdout
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_invalid_file_reports_failed(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_fixture(split_file, instances, "dev")
+    predictions = tmp_path / "predictions_invalid.csv"
+    _write_valid_predictions(predictions, instances)
+    lines = predictions.read_text(encoding="utf-8").splitlines()
+    predictions.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    word_count, candidate_count = _expected_counts(instances)
+    result = run_cli(
+        "validate-predictions",
+        "--predictions", str(predictions),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "Predictions validation: FAILED" in result.stdout
+    assert "Split: dev" in result.stdout
+    assert (
+        f"Expected: {word_count} word instances, {candidate_count} candidate rows"
+        in result.stdout
+    )
+    assert "Found:" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_missing_split_file(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    missing_split = tmp_path / "missing-splits.csv"
+    result = run_cli(
+        "validate-predictions",
+        "--predictions", str(tmp_path / "predictions.csv"),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(missing_split),
+    )
+    assert result.returncode == 1
+    assert "cannot read split file" in result.stderr
+    assert str(missing_split) in result.stderr
+    assert "OK" not in result.stdout
+    assert "FAILED" not in result.stdout
+    assert "Traceback" not in result.stderr
+    assert "Traceback" not in result.stdout
+
+
+def test_validate_predictions_missing_checkout_checked_first(tmp_path):
+    missing = tmp_path / "missing-dictorpus-data"
+    result = run_cli(
+        "validate-predictions",
+        "--predictions", str(tmp_path / "missing-predictions.csv"),
+        "--split", "dev",
+        "--data-dir", str(missing),
+        "--split-file", str(tmp_path / "missing-splits.csv"),
+    )
+    assert result.returncode == 1
+    assert "dictorpus-data" in result.stderr
+    assert str(missing) in result.stderr
+    assert "cannot read predictions file" not in result.stderr
+    assert "split file" not in result.stderr
+    assert "Predictions validation" not in result.stdout
+    assert "Traceback" not in result.stderr
+    assert "Traceback" not in result.stdout
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_benchmark_integrity_failure(tmp_path, monkeypatch, capsys):
+    import cli as cli_pkg
+    from core.instances import Candidate, Instance
+
+    checkout = _tagged_checkout(tmp_path)
+    split_file = tmp_path / "splits_dev.csv"
+    split_file.write_text("language,text_id,split\nkrl,1,dev\n", encoding="utf-8")
+
+    def stub_tables(lang, data_dir):
+        return object()
+
+    duplicate = Instance(
+        language="krl",
+        word_id=7,
+        sentence_id=1,
+        text_id=1,
+        word="dup",
+        word_number=1,
+        sentence_xml="<s/>",
+        candidates=(Candidate(1, "A"), Candidate(2, "B")),
+        gold_analysis=Candidate(1, "A"),
+    )
+
+    class StubResult:
+        def __init__(self, instances):
+            self.instances = instances
+
+    monkeypatch.setattr(cli_pkg, "read_corpus_tables", stub_tables)
+    monkeypatch.setattr(
+        cli_pkg, "build_language_instances", lambda lang, tables: StubResult((duplicate,))
+    )
+    status = cli_pkg._run_validate_predictions(
+        argparse.Namespace(
+            predictions=tmp_path / "predictions.csv",
+            split="dev",
+            data_dir=checkout,
+            split_file=split_file,
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "strict benchmark" in captured.err
+    assert "duplicate word_id" in captured.err
+    assert "Predictions validation" not in captured.out
+    assert "Traceback" not in captured.err

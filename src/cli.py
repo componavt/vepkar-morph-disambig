@@ -28,6 +28,7 @@ from core.instances import (
     write_review_csv,
 )
 from core.predictions import (
+    BenchmarkIntegrityError,
     PredictionCsvParseError,
     PredictionFileReadError,
     validate_predictions,
@@ -408,23 +409,25 @@ def _read_split_rows(path: Path) -> tuple[tuple[str, int, str], ...]:
             header = next(reader, None)
             if tuple(header) != SPLIT_CSV_HEADER:
                 raise SplitError(
-                    f"Unexpected split CSV header in {path}: {header!r}"
+                    f"cannot parse split CSV: {path}: unexpected header {header!r}"
                 )
             for raw in reader:
                 if len(raw) != 3:
-                    raise SplitError(f"Invalid split CSV row in {path}: {raw!r}")
+                    raise SplitError(
+                        f"cannot parse split CSV: {path}: invalid row {raw!r}"
+                    )
                 language, text_id, split = raw
                 try:
                     parsed_text_id = int(text_id)
                 except ValueError as exc:
                     raise SplitError(
-                        f"Invalid split CSV text_id in {path}: {raw!r}"
+                        f"cannot parse split CSV: {path}: invalid text_id in row {raw!r}"
                     ) from exc
                 rows.append((language, parsed_text_id, split))
     except csv.Error as exc:
-        raise SplitError(f"Cannot parse split CSV: {path}: {exc}") from exc
+        raise SplitError(f"cannot parse split CSV: {path}: {exc}") from exc
     except OSError as exc:
-        raise SplitError(f"Cannot read split CSV: {path}: {exc}") from exc
+        raise SplitError(f"cannot read split file: {path}: {exc}") from exc
     return tuple(rows)
 
 
@@ -452,24 +455,51 @@ def _run_validate_predictions(args: argparse.Namespace) -> int:
     )
     try:
         split_rows = _read_split_rows(split_path)
+    except SplitError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
         result = validate_predictions(
             predictions_path=args.predictions,
             split=args.split,
             instances=instances,
             split_rows=split_rows,
         )
-    except (PredictionFileReadError, PredictionCsvParseError, SplitError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except PredictionFileReadError as exc:
+        print("error: cannot read predictions file:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        if exc.__cause__ is not None:
+            print(f"  {exc.__cause__}", file=sys.stderr)
         return 1
-    print(f"Predictions validation: {'OK' if result.is_valid else 'FAILED'}")
+    except PredictionCsvParseError as exc:
+        print("error: cannot parse predictions CSV:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        if exc.__cause__ is not None:
+            print(f"  {exc.__cause__}", file=sys.stderr)
+        return 1
+    except BenchmarkIntegrityError as exc:
+        print("error: strict benchmark is internally inconsistent:", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    if result.is_valid:
+        print("Predictions validation: OK")
+        print(f"Split: {args.split}")
+        print(
+            f"Validated: {result.expected_word_count} word instances, "
+            f"{result.expected_candidate_count} candidate rows"
+        )
+        return 0
+    print("Predictions validation: FAILED")
     print(f"Split: {args.split}")
-    if not result.is_valid:
-        return 1
     print(
-        f"Validated: {result.expected_word_count} word instances, "
+        f"Expected: {result.expected_word_count} word instances, "
         f"{result.expected_candidate_count} candidate rows"
     )
-    return 0
+    print(
+        f"Found: {result.predicted_word_count} word instances, "
+        f"{result.predicted_candidate_count} prediction rows"
+    )
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:

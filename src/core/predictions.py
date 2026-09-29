@@ -30,6 +30,10 @@ class PredictionFileReadError(RuntimeError):
 class PredictionCsvParseError(RuntimeError):
     """The prediction CSV is syntactically malformed."""
 
+
+class BenchmarkIntegrityError(RuntimeError):
+    """The strict benchmark instances are internally inconsistent."""
+
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*")
 
 
@@ -105,7 +109,7 @@ def validate_predictions(
     instance_list = tuple(instances)
     word_ids = [instance.word_id for instance in instance_list]
     if len(word_ids) != len(set(word_ids)):
-        raise RuntimeError(
+        raise BenchmarkIntegrityError(
             "Strict benchmark has duplicate word_id values across instances; "
             "predictions.csv cannot identify candidates unambiguously."
         )
