@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -17,6 +19,11 @@ from core.data import (
     resolve_data_dir,
 )
 from core.fetch import FetchError, fetch_data
+from core.frequency import (
+    TargetSplitError,
+    build_train_frequency,
+    rank_by_train_frequency,
+)
 from core.instances import (
     DEFAULT_OUTPUT_DIR,
     CorpusTagError,
@@ -28,6 +35,7 @@ from core.instances import (
     write_review_csv,
 )
 from core.predictions import (
+    PREDICTION_HEADER,
     BenchmarkIntegrityError,
     PredictionCsvParseError,
     PredictionFileReadError,
@@ -135,6 +143,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
     )
     validate.add_argument(
+        "--split-file",
+        type=Path,
+        default=None,
+        help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
+    )
+    baseline = commands.add_parser(
+        "frequency-baseline",
+        help="Generate a train-frequency baseline predictions CSV for dev or test",
+    )
+    baseline.add_argument(
+        "--split",
+        choices=("dev", "test"),
+        required=True,
+        help="Benchmark split the baseline ranks",
+    )
+    baseline.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path to the generated predictions CSV",
+    )
+    baseline.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    baseline.add_argument(
         "--split-file",
         type=Path,
         default=None,
@@ -431,6 +467,33 @@ def _read_split_rows(path: Path) -> tuple[tuple[str, int, str], ...]:
     return tuple(rows)
 
 
+def _print_validation_failure(result) -> None:
+    """Print the detailed validation-category report for a failed validation."""
+    print("Predictions validation: FAILED")
+    print(f"Split: {result.split}")
+    print(
+        f"Expected: {result.expected_word_count} word instances, "
+        f"{result.expected_candidate_count} candidate rows"
+    )
+    print(
+        f"Found: {result.predicted_word_count} word instances, "
+        f"{result.predicted_candidate_count} prediction rows"
+    )
+    print()
+    # Iterate error_counts in the validator's stable insertion order, which is
+    # deterministic for a fixed input; the CLI does not sort or rename
+    # categories.  error_counts holds the full count while errors holds at most
+    # three representative examples, so the count is never inferred from the
+    # example list length.
+    for category in result.error_counts:
+        count = result.error_counts[category]
+        examples = result.errors[category]
+        noun = "violation" if count == 1 else "violations"
+        print(f"{category}: {count} {noun}")
+        for example in examples[:3]:
+            print(f"  {example}")
+
+
 def _run_validate_predictions(args: argparse.Namespace) -> int:
     data_dir = resolve_data_dir(args.data_dir)
     try:
@@ -489,30 +552,125 @@ def _run_validate_predictions(args: argparse.Namespace) -> int:
             f"{result.expected_candidate_count} candidate rows"
         )
         return 0
-    print("Predictions validation: FAILED")
-    print(f"Split: {args.split}")
-    print(
-        f"Expected: {result.expected_word_count} word instances, "
-        f"{result.expected_candidate_count} candidate rows"
-    )
-    print(
-        f"Found: {result.predicted_word_count} word instances, "
-        f"{result.predicted_candidate_count} prediction rows"
-    )
-    print()
-    # Iterate error_counts in the validator's stable insertion order, which is
-    # deterministic for a fixed input; the CLI does not sort or rename
-    # categories.  error_counts holds the full count while errors holds at most
-    # three representative examples, so the count is never inferred from the
-    # example list length.
-    for category in result.error_counts:
-        count = result.error_counts[category]
-        examples = result.errors[category]
-        noun = "violation" if count == 1 else "violations"
-        print(f"{category}: {count} {noun}")
-        for example in examples[:3]:
-            print(f"  {example}")
+    _print_validation_failure(result)
     return 1
+
+
+def _run_frequency_baseline(args: argparse.Namespace) -> int:
+    data_dir = resolve_data_dir(args.data_dir)
+    output_path = Path(args.output)
+    try:
+        require_local_corpus(data_dir)
+        tag = determine_data_tag(data_dir)
+    except (CorpusTagError, DataError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if output_path.exists():
+        print("error: output file already exists:", file=sys.stderr)
+        print(f"  {output_path}", file=sys.stderr)
+        return 1
+    if not output_path.parent.is_dir():
+        print("error: output directory does not exist:", file=sys.stderr)
+        print(f"  {output_path.parent}", file=sys.stderr)
+        return 1
+    instances = []
+    for lang in SUPPORTED_LANGUAGES:
+        try:
+            tables = read_corpus_tables(lang, data_dir)
+            result = build_language_instances(lang, tables)
+        except DataError as exc:
+            print(f"  {lang}  FAILED: {exc}", file=sys.stderr, flush=True)
+            return 1
+        instances.extend(result.instances)
+    split_path = (
+        args.split_file
+        if args.split_file is not None
+        else split_csv_path(DEFAULT_SPLIT_OUTPUT_DIR, tag)
+    )
+    try:
+        split_rows = _read_split_rows(split_path)
+    except SplitError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        rows = rank_by_train_frequency(instances, split_rows, args.split)
+    except TargetSplitError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    frequency = build_train_frequency(instances, split_rows)
+    train_occurrences = sum(frequency.values())
+    distinct_keys = len(frequency)
+    word_count = len({row.word_id for row in rows})
+    candidate_count = len(rows)
+
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=".vepkar-frequency-", suffix=".tmp", dir=str(output_path.parent)
+    )
+    os.close(descriptor)
+    temp_path = Path(temp_name)
+    published = False
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(PREDICTION_HEADER)
+            for row in rows:
+                writer.writerow(
+                    [row.word_id, row.wordform_id, row.gramset, row.rank, row.score]
+                )
+        try:
+            validation = validate_predictions(
+                predictions_path=temp_path,
+                split=args.split,
+                instances=instances,
+                split_rows=split_rows,
+            )
+        except PredictionFileReadError as exc:
+            print(
+                "error: frequency baseline could not read its temporary "
+                "predictions file:",
+                file=sys.stderr,
+            )
+            print(f"  {temp_path}", file=sys.stderr)
+            if exc.__cause__ is not None:
+                print(f"  {exc.__cause__}", file=sys.stderr)
+            return 1
+        except PredictionCsvParseError as exc:
+            print(
+                "error: frequency baseline could not parse its temporary "
+                "predictions CSV:",
+                file=sys.stderr,
+            )
+            print(f"  {temp_path}", file=sys.stderr)
+            if exc.__cause__ is not None:
+                print(f"  {exc.__cause__}", file=sys.stderr)
+            return 1
+        except BenchmarkIntegrityError as exc:
+            print(
+                "error: strict benchmark is internally inconsistent:",
+                file=sys.stderr,
+            )
+            print(f"  {exc}", file=sys.stderr)
+            return 1
+        if not validation.is_valid:
+            print(
+                "error: frequency baseline generated an invalid predictions CSV",
+                file=sys.stderr,
+            )
+            _print_validation_failure(validation)
+            return 1
+        os.replace(temp_path, output_path)
+        published = True
+    finally:
+        if not published and temp_path.exists():
+            temp_path.unlink()
+    print("Frequency baseline: OK")
+    print(f"Training gold occurrences: {train_occurrences}")
+    print(f"Distinct train candidate keys: {distinct_keys}")
+    print(f"Split: {args.split}")
+    print(f"Generated: {word_count} word instances, {candidate_count} candidate rows")
+    print(f"Output: {output_path}")
+    print("Validation: OK")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -566,6 +724,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_make_splits(args)
     if args.command == "validate-predictions":
         return _run_validate_predictions(args)
+    if args.command == "frequency-baseline":
+        return _run_frequency_baseline(args)
     parser.print_help()
     return 0
 

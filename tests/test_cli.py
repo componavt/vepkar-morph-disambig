@@ -16,7 +16,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from test_splits import GIT_AVAILABLE, _tagged_checkout  # noqa: E402
 from core.data import SUPPORTED_LANGUAGES, read_corpus_tables  # noqa: E402
+from core.frequency import build_train_frequency, rank_by_train_frequency  # noqa: E402
 from core.instances import build_language_instances  # noqa: E402
+from core.predictions import validate_predictions  # noqa: E402
 
 SOURCE_DIRS = ("core", "t1_features", "t2_context", "t3_transfer")
 
@@ -629,4 +631,292 @@ def test_validate_predictions_failed_report_category_order(tmp_path):
     assert "wrong split" in result.stdout
     assert "unknown word" in result.stdout
     assert result.stdout.index("wrong split") < result.stdout.index("unknown word")
+    assert "Traceback" not in result.stderr
+
+
+def _part_of(text_id: int) -> str:
+    index = text_id % 100
+    if index <= 3:
+        return "train"
+    if index <= 5:
+        return "dev"
+    return "test"
+
+
+def _write_split_parts(path: Path, instances) -> None:
+    keys = sorted({(inst.language, int(inst.text_id)) for inst in instances})
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["language", "text_id", "split"])
+        writer.writerows((lang, text_id, _part_of(text_id)) for lang, text_id in keys)
+
+
+def _read_split_rows(path: Path) -> tuple[tuple[str, int, str], ...]:
+    rows = []
+    with path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.reader(fh, strict=True)
+        next(reader)
+        for language, text_id, part in reader:
+            rows.append((language, int(text_id), part))
+    return tuple(rows)
+
+
+def _split_instances(instances, split_rows: tuple[tuple[str, int, str], ...], part: str):
+    split_by_text = {
+        (language, text_id): split for language, text_id, split in split_rows
+    }
+    return [
+        inst
+        for inst in instances
+        if split_by_text.get((inst.language, int(inst.text_id))) == part
+    ]
+
+
+def _run_frequency_baseline(tmp_path: Path, part: str):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / f"splits_{part}.csv"
+    _write_split_parts(split_file, instances)
+    output = tmp_path / f"frequency-{part}.csv"
+    result = run_cli(
+        "frequency-baseline",
+        "--split", part,
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    return result, output, instances, split_file, checkout
+
+
+def _read_generated(path: Path) -> tuple[list[str], list[list]]:
+    with path.open(encoding="utf-8", newline="") as fh:
+        reader = csv.reader(fh, strict=True)
+        header = next(reader)
+        rows = list(reader)
+    return header, rows
+
+
+def _repo_snapshot() -> set[tuple[str, str]]:
+    files: set[tuple[str, str]] = set()
+    for root in (ROOT / "results", ROOT / "data" / "derived"):
+        if root.is_dir():
+            for path in root.rglob("*"):
+                if path.is_file():
+                    files.add((str(path.relative_to(root)), path.stat().st_size))
+    return files
+
+
+def _checkout_snapshot(checkout: Path) -> set[tuple[str, str]]:
+    return {
+        (str(path.relative_to(checkout)), path.stat().st_size)
+        for path in checkout.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_dev_ok(tmp_path):
+    result, output, instances, split_file, _ = _run_frequency_baseline(tmp_path, "dev")
+    assert result.returncode == 0, result.stderr
+    split_rows = _read_split_rows(split_file)
+    expected = rank_by_train_frequency(instances, split_rows, "dev")
+    target_instances = _split_instances(instances, split_rows, "dev")
+    frequency = build_train_frequency(instances, split_rows)
+    for line in (
+        "Frequency baseline: OK",
+        "Training gold occurrences:",
+        "Distinct train candidate keys:",
+        "Split: dev",
+        "Generated:",
+        "Validation: OK",
+    ):
+        assert line in result.stdout
+    assert str(output) in result.stdout
+    assert (
+        f"Training gold occurrences: {sum(frequency.values())}" in result.stdout
+    )
+    assert f"Distinct train candidate keys: {len(frequency)}" in result.stdout
+    assert (
+        f"Generated: {len({inst.word_id for inst in target_instances})} "
+        f"word instances, {len(expected)} candidate rows"
+    ) in result.stdout
+    assert "Traceback" not in result.stderr
+    assert output.is_file()
+
+    header, raw_rows = _read_generated(output)
+    assert header == ["word_id", "wordform_id", "gramset", "rank", "score"]
+    assert raw_rows
+    assert all(len(row) == 5 for row in raw_rows)
+    rows = [(int(r[0]), int(r[1]), r[2], int(r[3]), int(r[4])) for r in raw_rows]
+    target_word_ids = {inst.word_id for inst in target_instances}
+    assert {row[0] for row in rows} == target_word_ids
+    assert rows == [
+        (row.word_id, row.wordform_id, row.gramset, row.rank, row.score)
+        for row in expected
+    ]
+    validation = validate_predictions(output, "dev", instances, split_rows)
+    assert validation.is_valid
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_test_ok(tmp_path):
+    result, output, instances, split_file, _ = _run_frequency_baseline(tmp_path, "test")
+    assert result.returncode == 0, result.stderr
+    split_rows = _read_split_rows(split_file)
+    expected = rank_by_train_frequency(instances, split_rows, "test")
+    target_instances = _split_instances(instances, split_rows, "test")
+    assert "Split: test" in result.stdout
+    header, raw_rows = _read_generated(output)
+    assert header == ["word_id", "wordform_id", "gramset", "rank", "score"]
+    rows = [(int(r[0]), int(r[1]), r[2], int(r[3]), int(r[4])) for r in raw_rows]
+    assert {row[0] for row in rows} == {inst.word_id for inst in target_instances}
+    assert rows == [
+        (row.word_id, row.wordform_id, row.gramset, row.rank, row.score)
+        for row in expected
+    ]
+    validation = validate_predictions(output, "test", instances, split_rows)
+    assert validation.is_valid
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_creates_no_repo_outputs(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    output = tmp_path / "frequency-dev.csv"
+    before_files = {path.name for path in tmp_path.iterdir()}
+    repo_before = _repo_snapshot()
+    checkout_before = _checkout_snapshot(checkout)
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "dev",
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 0, result.stderr
+    after_files = {path.name for path in tmp_path.iterdir()}
+    assert after_files == before_files | {output.name}
+    assert _repo_snapshot() == repo_before
+    assert _checkout_snapshot(checkout) == checkout_before
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_existing_output_protected(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    output = tmp_path / "frequency-dev.csv"
+    original = "word_id,wordform_id,gramset,rank,score\n501,9001,SG+NOM,1,1\n"
+    output.write_text(original, encoding="utf-8")
+    repo_before = _repo_snapshot()
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "dev",
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert str(output) in result.stderr
+    assert "already exists" in result.stderr
+    assert output.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    assert _repo_snapshot() == repo_before
+    assert "Frequency baseline: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_missing_output_dir(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    missing_parent = tmp_path / "no-such-dir"
+    output = missing_parent / "out.csv"
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "dev",
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "output directory does not exist" in result.stderr
+    assert str(missing_parent) in result.stderr
+    assert not missing_parent.exists()
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_output_is_directory(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    output = tmp_path / "outdir"
+    output.mkdir()
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "dev",
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert str(output) in result.stderr
+    assert output.is_dir()
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    assert "Traceback" not in result.stderr
+
+
+def test_frequency_baseline_rejects_train(tmp_path):
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "train",
+        "--output", str(tmp_path / "out.csv"),
+    )
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
+    assert "train" in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_missing_checkout_checked_first(tmp_path):
+    missing = tmp_path / "missing-dictorpus-data"
+    output = tmp_path / "out.csv"
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "dev",
+        "--output", str(output),
+        "--data-dir", str(missing),
+    )
+    assert result.returncode == 1
+    assert "dictorpus-data" in result.stderr
+    assert str(missing) in result.stderr
+    assert "output file already exists" not in result.stderr
+    assert not output.exists()
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_missing_split_file(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    missing_split = tmp_path / "missing-splits.csv"
+    output = tmp_path / "out.csv"
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "dev",
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(missing_split),
+    )
+    assert result.returncode == 1
+    assert "cannot read split file" in result.stderr
+    assert str(missing_split) in result.stderr
+    assert not output.exists()
     assert "Traceback" not in result.stderr
