@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 import tomllib
 from pathlib import Path
@@ -26,8 +27,14 @@ from core.instances import (
     review_csv_path,
     write_review_csv,
 )
+from core.predictions import (
+    PredictionCsvParseError,
+    PredictionFileReadError,
+    validate_predictions,
+)
 from core.splits import (
     DEFAULT_SPLIT_OUTPUT_DIR,
+    SPLIT_CSV_HEADER,
     SplitError,
     TextWeight,
     assign_texts,
@@ -103,6 +110,34 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Directory for the derived split CSV (default: data/derived)",
+    )
+    validate = commands.add_parser(
+        "validate-predictions",
+        help="Validate one temporary prediction CSV against a benchmark split",
+    )
+    validate.add_argument(
+        "--predictions",
+        type=Path,
+        required=True,
+        help="Path to the temporary predictions CSV",
+    )
+    validate.add_argument(
+        "--split",
+        choices=("dev", "test"),
+        required=True,
+        help="Benchmark split the predictions file belongs to",
+    )
+    validate.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    validate.add_argument(
+        "--split-file",
+        type=Path,
+        default=None,
+        help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
     )
     return parser
 
@@ -364,6 +399,79 @@ def _run_make_splits(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_split_rows(path: Path) -> tuple[tuple[str, int, str], ...]:
+    """Read ``(language, text_id, split)`` rows from a published splits CSV."""
+    rows: list[tuple[str, int, str]] = []
+    try:
+        with open(path, encoding="utf-8", newline="") as fh:
+            reader = csv.reader(fh, strict=True)
+            header = next(reader, None)
+            if tuple(header) != SPLIT_CSV_HEADER:
+                raise SplitError(
+                    f"Unexpected split CSV header in {path}: {header!r}"
+                )
+            for raw in reader:
+                if len(raw) != 3:
+                    raise SplitError(f"Invalid split CSV row in {path}: {raw!r}")
+                language, text_id, split = raw
+                try:
+                    parsed_text_id = int(text_id)
+                except ValueError as exc:
+                    raise SplitError(
+                        f"Invalid split CSV text_id in {path}: {raw!r}"
+                    ) from exc
+                rows.append((language, parsed_text_id, split))
+    except csv.Error as exc:
+        raise SplitError(f"Cannot parse split CSV: {path}: {exc}") from exc
+    except OSError as exc:
+        raise SplitError(f"Cannot read split CSV: {path}: {exc}") from exc
+    return tuple(rows)
+
+
+def _run_validate_predictions(args: argparse.Namespace) -> int:
+    data_dir = resolve_data_dir(args.data_dir)
+    try:
+        require_local_corpus(data_dir)
+        tag = determine_data_tag(data_dir)
+    except (CorpusTagError, DataError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    instances = []
+    for lang in SUPPORTED_LANGUAGES:
+        try:
+            tables = read_corpus_tables(lang, data_dir)
+            result = build_language_instances(lang, tables)
+        except DataError as exc:
+            print(f"  {lang}  FAILED: {exc}", file=sys.stderr, flush=True)
+            return 1
+        instances.extend(result.instances)
+    split_path = (
+        args.split_file
+        if args.split_file is not None
+        else split_csv_path(DEFAULT_SPLIT_OUTPUT_DIR, tag)
+    )
+    try:
+        split_rows = _read_split_rows(split_path)
+        result = validate_predictions(
+            predictions_path=args.predictions,
+            split=args.split,
+            instances=instances,
+            split_rows=split_rows,
+        )
+    except (PredictionFileReadError, PredictionCsvParseError, SplitError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Predictions validation: {'OK' if result.is_valid else 'FAILED'}")
+    print(f"Split: {args.split}")
+    if not result.is_valid:
+        return 1
+    print(
+        f"Validated: {result.expected_word_count} word instances, "
+        f"{result.expected_candidate_count} candidate rows"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -413,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "make-splits":
         return _run_make_splits(args)
+    if args.command == "validate-predictions":
+        return _run_validate_predictions(args)
     parser.print_help()
     return 0
 
