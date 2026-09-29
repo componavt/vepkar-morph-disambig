@@ -91,6 +91,7 @@ def test_valid_multi_word_file(tmp_path):
     assert result.predicted_word_count == 3
     assert result.predicted_candidate_count == 7
     assert result.errors == {}
+    assert result.error_counts == {}
 
 
 @pytest.mark.parametrize(
@@ -117,6 +118,22 @@ def test_missing_expected_candidate(tmp_path):
     result = validate_predictions(path, "train", _all_instances(), SPLIT_ROWS)
     assert not result.is_valid
     assert "missing candidate" in result.errors
+
+
+def test_missing_candidate_full_count(tmp_path):
+    path = tmp_path / "predictions.csv"
+    _write(
+        path,
+        [
+            (501, 9001, "SG+NOM", 1, 125),
+            (502, 7712, "SG+NOM", 1, 42),
+            (503, 1001, "N+SG+NOM", 1, 10),
+        ],
+    )
+    result = validate_predictions(path, "train", TRAIN_INSTANCES, SPLIT_ROWS)
+    assert not result.is_valid
+    assert result.error_counts["missing candidate"] == 4
+    assert len(result.errors["missing candidate"]) == 3
 
 
 def test_unexpected_candidate(tmp_path):
@@ -261,19 +278,21 @@ def test_invalid_score(tmp_path, score):
     assert "invalid score" in result.errors
 
 
-def test_empty_gramset(tmp_path):
+@pytest.mark.parametrize("value", ["", " ", "   ", "\t", "\n"])
+def test_empty_gramset(tmp_path, value):
     path = tmp_path / "predictions.csv"
-    _write(
-        path,
-        [
-            (501, 9001, "", 1, 125),
-            (501, 9001, "SG+ACC", 2, 17),
-            (501, 9002, "PL+GEN", 3, 3),
-        ],
-    )
+    import csv as _csv
+
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = _csv.writer(fh)
+        writer.writerow(["word_id", "wordform_id", "gramset", "rank", "score"])
+        writer.writerow([501, 9001, value, 1, 125])
+        writer.writerow([501, 9001, "SG+ACC", 2, 17])
+        writer.writerow([501, 9002, "PL+GEN", 3, 3])
     result = validate_predictions(path, "train", [INSTANCE_501], SPLIT_ROWS)
     assert not result.is_valid
     assert "empty gramset" in result.errors
+    assert result.error_counts["empty gramset"] == 1
 
 
 @pytest.mark.parametrize("value", ["0", "-5", "abc", ""])
