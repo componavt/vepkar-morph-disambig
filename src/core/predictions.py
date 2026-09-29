@@ -25,8 +25,14 @@ _MAX_ERROR_EXAMPLES = 3
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*")
 
 
-def _record_error(errors: dict[str, list[str]], category: str, example: str) -> None:
+def _record_error(
+    errors: dict[str, list[str]],
+    error_counts: dict[str, int],
+    category: str,
+    example: str,
+) -> None:
     """Append one example to a category, keeping at most three examples."""
+    error_counts[category] = error_counts.get(category, 0) + 1
     examples = errors.setdefault(category, [])
     if len(examples) < _MAX_ERROR_EXAMPLES:
         examples.append(example)
@@ -72,6 +78,7 @@ class PredictionValidation:
     predicted_word_count: int
     predicted_candidate_count: int
     errors: dict[str, tuple[str, ...]]
+    error_counts: dict[str, int]
 
 
 def validate_predictions(
@@ -89,24 +96,19 @@ def validate_predictions(
     """
     instance_list = tuple(instances)
     split_row_tuple = tuple(split_rows)
-    split_texts = {
-        (language, int(text_id))
+    split_by_text = {
+        (language, int(text_id)): part
         for language, text_id, part in split_row_tuple
-        if part == split
+    }
+    split_texts = {
+        key for key, part in split_by_text.items() if part == split
     }
 
     expected_candidates: dict[int, tuple[tuple[int, str], ...]] = {}
     split_of_word: dict[int, str | None] = {}
     for instance in instance_list:
         key = (instance.language, int(instance.text_id))
-        part = next(
-            (
-                row_split
-                for language, text_id, row_split in split_row_tuple
-                if (language, int(text_id)) == key
-            ),
-            None,
-        )
+        part = split_by_text.get(key)
         split_of_word[instance.word_id] = part
         if key in split_texts:
             expected_candidates[instance.word_id] = tuple(
@@ -119,6 +121,7 @@ def validate_predictions(
     )
 
     errors: dict[str, list[str]] = {}
+    error_counts: dict[str, int] = {}
     rows: list[_PredictionRow] = []
     rows_by_word: dict[int, list[_PredictionRow]] = {}
     seen_identities: set[tuple[int, int, str]] = set()
@@ -129,6 +132,7 @@ def validate_predictions(
         if tuple(header) != PREDICTION_HEADER:
             _record_error(
                 errors,
+                error_counts,
                 "header",
                 f"expected {','.join(PREDICTION_HEADER)}; got {header!r}",
             )
@@ -137,6 +141,7 @@ def validate_predictions(
                 if len(raw) != len(PREDICTION_HEADER):
                     _record_error(
                         errors,
+                        error_counts,
                         "row width",
                         f"expected {len(PREDICTION_HEADER)} columns; "
                         f"got {len(raw)}: {raw!r}",
@@ -148,36 +153,57 @@ def validate_predictions(
                 rank = _parse_positive_int(rank_text)
                 score = _parse_score(score_text)
                 if word_id is None:
-                    _record_error(errors, "invalid word_id", f"word_id={word_id_text!r}")
+                    _record_error(
+                        errors,
+                        error_counts,
+                        "invalid word_id",
+                        f"word_id={word_id_text!r}",
+                    )
                 if wordform_id is None:
                     _record_error(
-                        errors, "invalid wordform_id", f"wordform_id={wordform_id_text!r}"
+                        errors,
+                        error_counts,
+                        "invalid wordform_id",
+                        f"wordform_id={wordform_id_text!r}",
                     )
                 if gramset == "":
                     _record_error(
                         errors,
+                        error_counts,
+                        "empty gramset",
+                        f"word_id={word_id_text!r}; gramset={gramset!r}",
+                    )
+                elif gramset.strip() == "":
+                    _record_error(
+                        errors,
+                        error_counts,
                         "empty gramset",
                         f"word_id={word_id_text!r}; gramset={gramset!r}",
                     )
                 if rank is None:
-                    _record_error(errors, "invalid rank", f"rank={rank_text!r}")
+                    _record_error(
+                        errors, error_counts, "invalid rank", f"rank={rank_text!r}"
+                    )
                 if score is None:
                     _record_error(
                         errors,
+                        error_counts,
                         "invalid score",
                         f"word_id={word_id_text!r}; score={score_text!r}",
                     )
                 if (
                     word_id is None
                     or wordform_id is None
-                    or gramset == ""
+                    or gramset.strip() == ""
                     or rank is None
                     or score is None
                 ):
                     continue
                 identity = (word_id, wordform_id, gramset)
                 if identity in seen_identities:
-                    _record_error(errors, "duplicate candidate", f"{identity!r}")
+                    _record_error(
+                        errors, error_counts, "duplicate candidate", f"{identity!r}"
+                    )
                 else:
                     seen_identities.add(identity)
                 row = _PredictionRow(word_id, wordform_id, gramset, rank, score)
@@ -195,12 +221,14 @@ def validate_predictions(
         for missing in sorted(expected_set - predicted_tuples):
             _record_error(
                 errors,
+                error_counts,
                 "missing candidate",
                 f"word_id={word_id}; candidate={missing!r}",
             )
         for unexpected in sorted(predicted_tuples - expected_set):
             _record_error(
                 errors,
+                error_counts,
                 "unexpected candidate",
                 f"word_id={word_id}; candidate={unexpected!r}",
             )
@@ -209,6 +237,7 @@ def validate_predictions(
         if set(ranks) != expected_ranks or len(ranks) != len(set(ranks)):
             _record_error(
                 errors,
+                error_counts,
                 "rank set",
                 f"word_id={word_id}; ranks={sorted(ranks)}; "
                 f"expected {sorted(expected_ranks)}",
@@ -218,6 +247,7 @@ def validate_predictions(
             if first.score < second.score:
                 _record_error(
                     errors,
+                    error_counts,
                     "score order",
                     f"word_id={word_id}; rank={first.rank} score={first.score} "
                     f"< rank={second.rank} score={second.score}",
@@ -225,17 +255,18 @@ def validate_predictions(
 
     missing_words = expected_word_ids - predicted_word_ids
     for word_id in sorted(missing_words):
-        _record_error(errors, "missing word", f"word_id={word_id}")
+        _record_error(errors, error_counts, "missing word", f"word_id={word_id}")
 
     for word_id in sorted(predicted_word_ids - expected_word_ids):
         if word_id in split_of_word:
             _record_error(
                 errors,
+                error_counts,
                 "wrong split",
                 f"word_id={word_id} belongs to split {split_of_word[word_id]!r}",
             )
         else:
-            _record_error(errors, "unknown word", f"word_id={word_id}")
+            _record_error(errors, error_counts, "unknown word", f"word_id={word_id}")
 
     return PredictionValidation(
         is_valid=not errors,
@@ -245,4 +276,5 @@ def validate_predictions(
         predicted_word_count=len(predicted_word_ids),
         predicted_candidate_count=predicted_candidate_count,
         errors={category: tuple(examples) for category, examples in errors.items()},
+        error_counts=dict(error_counts),
     )
