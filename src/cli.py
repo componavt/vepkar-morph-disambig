@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 
 from core.data import (
@@ -27,6 +28,7 @@ from core.frequency import (
 from core.instances import (
     DEFAULT_OUTPUT_DIR,
     CorpusTagError,
+    Instance,
     LanguageInstances,
     build_language_instances,
     build_review_rows,
@@ -467,17 +469,66 @@ def _read_split_rows(path: Path) -> tuple[tuple[str, int, str], ...]:
     return tuple(rows)
 
 
+@dataclass(frozen=True)
+class BenchmarkContext:
+    """Read-only strict instances and split rows for one benchmark tag."""
+
+    tag: str
+    split_path: Path
+    instances: tuple[Instance, ...]
+    split_rows: tuple[tuple[str, int, str], ...]
+
+
+def _preflight_benchmark(
+    data_dir_override: Path | None,
+) -> tuple[Path, str]:
+    """Resolve checkout, require it locally, and determine its tag."""
+    data_dir = resolve_data_dir(data_dir_override)
+    require_local_corpus(data_dir)
+    tag = determine_data_tag(data_dir)
+    return data_dir, tag
+
+
+def load_benchmark_context(
+    data_dir: Path,
+    tag: str,
+    split_file_override: Path | None = None,
+) -> BenchmarkContext:
+    """Load strict instances and split rows without writing anything."""
+    instances: list[Instance] = []
+    for lang in SUPPORTED_LANGUAGES:
+        try:
+            tables = read_corpus_tables(lang, data_dir)
+            result = build_language_instances(lang, tables)
+        except DataError as exc:
+            print(f"  {lang}  FAILED: {exc}", file=sys.stderr, flush=True)
+            raise
+        instances.extend(result.instances)
+    split_path = (
+        split_file_override
+        if split_file_override is not None
+        else split_csv_path(DEFAULT_SPLIT_OUTPUT_DIR, tag)
+    )
+    split_rows = _read_split_rows(split_path)
+    return BenchmarkContext(
+        tag=tag,
+        split_path=split_path,
+        instances=tuple(instances),
+        split_rows=split_rows,
+    )
+
+
 def _print_validation_failure(result) -> None:
     """Print the detailed validation-category report for a failed validation."""
     print("Predictions validation: FAILED")
     print(f"Split: {result.split}")
     print(
-        f"Expected: {result.expected_word_count} word instances, "
-        f"{result.expected_candidate_count} candidate rows"
+        f"Expected: {result.expected_word_count:,} word instances, "
+        f"{result.expected_candidate_count:,} candidate rows"
     )
     print(
-        f"Found: {result.predicted_word_count} word instances, "
-        f"{result.predicted_candidate_count} prediction rows"
+        f"Found: {result.predicted_word_count:,} word instances, "
+        f"{result.predicted_candidate_count:,} prediction rows"
     )
     print()
     # Iterate error_counts in the validator's stable insertion order, which is
@@ -489,35 +540,21 @@ def _print_validation_failure(result) -> None:
         count = result.error_counts[category]
         examples = result.errors[category]
         noun = "violation" if count == 1 else "violations"
-        print(f"{category}: {count} {noun}")
+        print(f"{category}: {count:,} {noun}")
         for example in examples[:3]:
             print(f"  {example}")
 
 
 def _run_validate_predictions(args: argparse.Namespace) -> int:
-    data_dir = resolve_data_dir(args.data_dir)
     try:
-        require_local_corpus(data_dir)
-        tag = determine_data_tag(data_dir)
+        data_dir, tag = _preflight_benchmark(args.data_dir)
     except (CorpusTagError, DataError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    instances = []
-    for lang in SUPPORTED_LANGUAGES:
-        try:
-            tables = read_corpus_tables(lang, data_dir)
-            result = build_language_instances(lang, tables)
-        except DataError as exc:
-            print(f"  {lang}  FAILED: {exc}", file=sys.stderr, flush=True)
-            return 1
-        instances.extend(result.instances)
-    split_path = (
-        args.split_file
-        if args.split_file is not None
-        else split_csv_path(DEFAULT_SPLIT_OUTPUT_DIR, tag)
-    )
     try:
-        split_rows = _read_split_rows(split_path)
+        context = load_benchmark_context(data_dir, tag, args.split_file)
+    except DataError:
+        return 1
     except SplitError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -525,8 +562,8 @@ def _run_validate_predictions(args: argparse.Namespace) -> int:
         result = validate_predictions(
             predictions_path=args.predictions,
             split=args.split,
-            instances=instances,
-            split_rows=split_rows,
+            instances=context.instances,
+            split_rows=context.split_rows,
         )
     except PredictionFileReadError as exc:
         print("error: cannot read predictions file:", file=sys.stderr)
@@ -548,8 +585,8 @@ def _run_validate_predictions(args: argparse.Namespace) -> int:
         print("Predictions validation: OK")
         print(f"Split: {args.split}")
         print(
-            f"Validated: {result.expected_word_count} word instances, "
-            f"{result.expected_candidate_count} candidate rows"
+            f"Validated: {result.expected_word_count:,} word instances, "
+            f"{result.expected_candidate_count:,} candidate rows"
         )
         return 0
     _print_validation_failure(result)
@@ -557,15 +594,17 @@ def _run_validate_predictions(args: argparse.Namespace) -> int:
 
 
 def _run_frequency_baseline(args: argparse.Namespace) -> int:
-    data_dir = resolve_data_dir(args.data_dir)
     output_path = Path(args.output)
     try:
-        require_local_corpus(data_dir)
-        tag = determine_data_tag(data_dir)
+        data_dir, tag = _preflight_benchmark(args.data_dir)
     except (CorpusTagError, DataError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    if output_path.exists():
+    if output_path.is_dir():
+        print("error: output path is a directory:", file=sys.stderr)
+        print(f"  {output_path}", file=sys.stderr)
+        return 1
+    if output_path.exists() or output_path.is_symlink():
         print("error: output file already exists:", file=sys.stderr)
         print(f"  {output_path}", file=sys.stderr)
         return 1
@@ -573,31 +612,21 @@ def _run_frequency_baseline(args: argparse.Namespace) -> int:
         print("error: output directory does not exist:", file=sys.stderr)
         print(f"  {output_path.parent}", file=sys.stderr)
         return 1
-    instances = []
-    for lang in SUPPORTED_LANGUAGES:
-        try:
-            tables = read_corpus_tables(lang, data_dir)
-            result = build_language_instances(lang, tables)
-        except DataError as exc:
-            print(f"  {lang}  FAILED: {exc}", file=sys.stderr, flush=True)
-            return 1
-        instances.extend(result.instances)
-    split_path = (
-        args.split_file
-        if args.split_file is not None
-        else split_csv_path(DEFAULT_SPLIT_OUTPUT_DIR, tag)
-    )
     try:
-        split_rows = _read_split_rows(split_path)
+        context = load_benchmark_context(data_dir, tag, args.split_file)
+    except DataError:
+        return 1
     except SplitError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
-        rows = rank_by_train_frequency(instances, split_rows, args.split)
+        rows = rank_by_train_frequency(
+            context.instances, context.split_rows, args.split
+        )
     except TargetSplitError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    frequency = build_train_frequency(instances, split_rows)
+    frequency = build_train_frequency(context.instances, context.split_rows)
     train_occurrences = sum(frequency.values())
     distinct_keys = len(frequency)
     word_count = len({row.word_id for row in rows})
@@ -621,8 +650,8 @@ def _run_frequency_baseline(args: argparse.Namespace) -> int:
             validation = validate_predictions(
                 predictions_path=temp_path,
                 split=args.split,
-                instances=instances,
-                split_rows=split_rows,
+                instances=context.instances,
+                split_rows=context.split_rows,
             )
         except PredictionFileReadError as exc:
             print(
@@ -664,10 +693,13 @@ def _run_frequency_baseline(args: argparse.Namespace) -> int:
         if not published and temp_path.exists():
             temp_path.unlink()
     print("Frequency baseline: OK")
-    print(f"Training gold occurrences: {train_occurrences}")
-    print(f"Distinct train candidate keys: {distinct_keys}")
+    print(f"Training gold occurrences: {train_occurrences:,}")
+    print(f"Distinct train candidate keys: {distinct_keys:,}")
     print(f"Split: {args.split}")
-    print(f"Generated: {word_count} word instances, {candidate_count} candidate rows")
+    print(
+        f"Generated: {word_count:,} word instances, "
+        f"{candidate_count:,} candidate rows"
+    )
     print(f"Output: {output_path}")
     print("Validation: OK")
     return 0
