@@ -151,23 +151,64 @@ def _write_split_fixture(path: Path, instances, part: str) -> None:
         writer.writerows((lang, text_id, part) for lang, text_id in keys)
 
 
+def _valid_prediction_rows(instances) -> list[list]:
+    rows = []
+    for instance in sorted(
+        instances, key=lambda inst: (inst.language, inst.word_id)
+    ):
+        for index, candidate in enumerate(instance.candidates, start=1):
+            rows.append(
+                [
+                    instance.word_id,
+                    candidate.wordform_id,
+                    candidate.gramset,
+                    index,
+                    len(instance.candidates) - index + 1,
+                ]
+            )
+    return rows
+
+
 def _write_valid_predictions(path: Path, instances) -> None:
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(["word_id", "wordform_id", "gramset", "rank", "score"])
-        for instance in sorted(
-            instances, key=lambda inst: (inst.language, inst.word_id)
-        ):
-            for index, candidate in enumerate(instance.candidates, start=1):
-                writer.writerow(
-                    [
-                        instance.word_id,
-                        candidate.wordform_id,
-                        candidate.gramset,
-                        index,
-                        len(instance.candidates) - index + 1,
-                    ]
-                )
+        writer.writerows(_valid_prediction_rows(instances))
+
+
+def _write_predictions(path: Path, rows) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["word_id", "wordform_id", "gramset", "rank", "score"])
+        writer.writerows(rows)
+
+
+def _run_validate_file(tmp_path: Path, part: str, build_rows):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    built = build_rows(instances)
+    if isinstance(built, tuple):
+        rows, split_rows = built
+    else:
+        rows, split_rows = built, None
+    split_file = tmp_path / f"splits_{part}.csv"
+    if split_rows is None:
+        _write_split_fixture(split_file, instances, part)
+    else:
+        with split_file.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["language", "text_id", "split"])
+            writer.writerows(split_rows)
+    predictions = tmp_path / f"predictions_{part}.csv"
+    _write_predictions(predictions, rows)
+    result = run_cli(
+        "validate-predictions",
+        "--predictions", str(predictions),
+        "--split", part,
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    return result, instances
 
 
 def _expected_counts(instances) -> tuple[int, int]:
@@ -447,3 +488,145 @@ def test_validate_predictions_benchmark_integrity_failure(tmp_path, monkeypatch,
     assert "duplicate word_id" in captured.err
     assert "Predictions validation" not in captured.out
     assert "Traceback" not in captured.err
+
+
+def _first_two(instances):
+    ordered = sorted(instances, key=lambda inst: (inst.language, inst.word_id))
+    return ordered[0], ordered[1]
+
+
+def _multi_category_rows(instances):
+    rows = _valid_prediction_rows(instances)
+    first, second = _first_two(instances)
+    rows.append([first.word_id, 9999999, "X+YZ", 3, "nan"])
+    removed = next(
+        row
+        for row in rows
+        if row[0] == second.word_id
+        and row[1] == second.candidates[-1].wordform_id
+        and row[2] == second.candidates[-1].gramset
+    )
+    rows.remove(removed)
+    rows.append([999999, 55555, "N+PL+NOM", 1, 1.0])
+    return rows
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_failed_report_multi_category(tmp_path):
+    result, instances = _run_validate_file(tmp_path, "dev", _multi_category_rows)
+    assert result.returncode == 1
+    assert "Predictions validation: FAILED" in result.stdout
+    assert "Predictions validation: OK" not in result.stdout
+    assert "Split: dev" in result.stdout
+    word_count, candidate_count = _expected_counts(instances)
+    assert (
+        f"Expected: {word_count} word instances, {candidate_count} candidate rows"
+        in result.stdout
+    )
+    assert "Found:" in result.stdout
+    for heading in (
+        "invalid score: 1 violation",
+        "missing candidate: 1 violation",
+        "rank set: 1 violation",
+        "unknown word: 1 violation",
+    ):
+        assert heading in result.stdout
+    first, second = _first_two(instances)
+    assert f"word_id='{first.word_id}'; score='nan'" in result.stdout
+    assert (
+        f"word_id={second.word_id}; "
+        f"candidate=({second.candidates[1].wordform_id}, "
+        f"'{second.candidates[1].gramset}')"
+    ) in result.stdout
+    assert f"word_id={second.word_id}; ranks=[1]; expected [1, 2]" in result.stdout
+    assert "word_id=999999" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def _four_invalid_score_rows(instances):
+    rows = _valid_prediction_rows(instances)
+    first, _ = _first_two(instances)
+    for _ in range(4):
+        rows.append([first.word_id, 9999999, "X+YZ", 1, "nan"])
+    return rows
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_failed_report_full_count_not_truncated(tmp_path):
+    result, _ = _run_validate_file(tmp_path, "dev", _four_invalid_score_rows)
+    assert result.returncode == 1
+    heading = "invalid score: 4 violations"
+    assert heading in result.stdout
+    lines = result.stdout.splitlines()
+    start = lines.index(heading)
+    examples = []
+    for line in lines[start + 1 :]:
+        if line.startswith("  "):
+            examples.append(line)
+        else:
+            break
+    assert len(examples) == 3
+    assert len(examples) <= 3
+
+
+def _single_invalid_score_rows(instances):
+    rows = _valid_prediction_rows(instances)
+    first, _ = _first_two(instances)
+    rows.append([first.word_id, 9999999, "X+YZ", 1, "nan"])
+    return rows
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_failed_report_singular_grammar(tmp_path):
+    result, _ = _run_validate_file(tmp_path, "dev", _single_invalid_score_rows)
+    assert result.returncode == 1
+    assert "Predictions validation: FAILED" in result.stdout
+    assert "invalid score: 1 violation" in result.stdout
+    assert "invalid score: 1 violations" not in result.stdout
+    assert "missing word" not in result.stdout
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_validate_predictions_failed_report_category_order(tmp_path):
+    def build_rows(instances):
+        krl = [inst for inst in instances if inst.language == "krl"]
+        by_text: dict[int, list] = {}
+        for inst in krl:
+            by_text.setdefault(int(inst.text_id), []).append(inst)
+        moved_text = sorted(by_text)[2]
+        moved = by_text[moved_text]
+        keys = {(inst.language, int(inst.text_id)) for inst in instances}
+        split_rows = [
+            (
+                lang,
+                text_id,
+                "test" if (lang == "krl" and text_id == moved_text) else "dev",
+            )
+            for lang, text_id in sorted(keys)
+        ]
+        dev_instances = [
+            inst
+            for inst in instances
+            if not (inst.language == "krl" and int(inst.text_id) == moved_text)
+        ]
+        rows = _valid_prediction_rows(dev_instances)
+        for inst in sorted(moved, key=lambda inst: inst.word_id):
+            for index, candidate in enumerate(inst.candidates, start=1):
+                rows.append(
+                    [
+                        inst.word_id,
+                        candidate.wordform_id,
+                        candidate.gramset,
+                        index,
+                        len(inst.candidates) - index + 1,
+                    ]
+                )
+        rows.append([999999, 55555, "N+PL+NOM", 1, 1.0])
+        return rows, split_rows
+
+    result, _ = _run_validate_file(tmp_path, "dev", build_rows)
+    assert result.returncode == 1
+    assert "wrong split" in result.stdout
+    assert "unknown word" in result.stdout
+    assert result.stdout.index("wrong split") < result.stdout.index("unknown word")
+    assert "Traceback" not in result.stderr
