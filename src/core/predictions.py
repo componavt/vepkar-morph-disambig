@@ -22,6 +22,14 @@ PREDICTION_HEADER = ("word_id", "wordform_id", "gramset", "rank", "score")
 
 _MAX_ERROR_EXAMPLES = 3
 
+
+class PredictionFileReadError(RuntimeError):
+    """The prediction CSV could not be opened or read."""
+
+
+class PredictionCsvParseError(RuntimeError):
+    """The prediction CSV is syntactically malformed."""
+
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*")
 
 
@@ -95,6 +103,12 @@ def validate_predictions(
     text_id)`` is assigned to ``split``.
     """
     instance_list = tuple(instances)
+    word_ids = [instance.word_id for instance in instance_list]
+    if len(word_ids) != len(set(word_ids)):
+        raise RuntimeError(
+            "Strict benchmark has duplicate word_id values across instances; "
+            "predictions.csv cannot identify candidates unambiguously."
+        )
     split_row_tuple = tuple(split_rows)
     split_by_text = {
         (language, int(text_id)): part
@@ -126,89 +140,104 @@ def validate_predictions(
     rows_by_word: dict[int, list[_PredictionRow]] = {}
     seen_identities: set[tuple[int, int, str]] = set()
 
-    with open(predictions_path, encoding="utf-8", newline="") as fh:
-        reader = csv.reader(fh)
-        header = next(reader, None)
-        if tuple(header) != PREDICTION_HEADER:
-            _record_error(
-                errors,
-                error_counts,
-                "header",
-                f"expected {','.join(PREDICTION_HEADER)}; got {header!r}",
-            )
-        else:
-            for raw in reader:
-                if len(raw) != len(PREDICTION_HEADER):
-                    _record_error(
-                        errors,
-                        error_counts,
-                        "row width",
-                        f"expected {len(PREDICTION_HEADER)} columns; "
-                        f"got {len(raw)}: {raw!r}",
-                    )
-                    continue
-                word_id_text, wordform_id_text, gramset, rank_text, score_text = raw
-                word_id = _parse_positive_int(word_id_text)
-                wordform_id = _parse_positive_int(wordform_id_text)
-                rank = _parse_positive_int(rank_text)
-                score = _parse_score(score_text)
-                if word_id is None:
-                    _record_error(
-                        errors,
-                        error_counts,
-                        "invalid word_id",
-                        f"word_id={word_id_text!r}",
-                    )
-                if wordform_id is None:
-                    _record_error(
-                        errors,
-                        error_counts,
-                        "invalid wordform_id",
-                        f"wordform_id={wordform_id_text!r}",
-                    )
-                if gramset == "":
-                    _record_error(
-                        errors,
-                        error_counts,
-                        "empty gramset",
-                        f"word_id={word_id_text!r}; gramset={gramset!r}",
-                    )
-                elif gramset.strip() == "":
-                    _record_error(
-                        errors,
-                        error_counts,
-                        "empty gramset",
-                        f"word_id={word_id_text!r}; gramset={gramset!r}",
-                    )
-                if rank is None:
-                    _record_error(
-                        errors, error_counts, "invalid rank", f"rank={rank_text!r}"
-                    )
-                if score is None:
-                    _record_error(
-                        errors,
-                        error_counts,
-                        "invalid score",
-                        f"word_id={word_id_text!r}; score={score_text!r}",
-                    )
-                if (
-                    word_id is None
-                    or wordform_id is None
-                    or gramset.strip() == ""
-                    or rank is None
-                    or score is None
-                ):
-                    continue
-                identity = (word_id, wordform_id, gramset)
-                if identity in seen_identities:
-                    _record_error(
-                        errors, error_counts, "duplicate candidate", f"{identity!r}"
-                    )
-                else:
-                    seen_identities.add(identity)
-                row = _PredictionRow(word_id, wordform_id, gramset, rank, score)
-                rows.append(row)
-                rows_by_word.setdefault(word_id, []).append(row)
+    try:
+        with open(predictions_path, encoding="utf-8", newline="") as fh:
+            reader = csv.reader(fh, strict=True)
+            header = next(reader, None)
+            if tuple(header) != PREDICTION_HEADER:
+                _record_error(
+                    errors,
+                    error_counts,
+                    "header",
+                    f"expected {','.join(PREDICTION_HEADER)}; got {header!r}",
+                )
+            else:
+                for raw in reader:
+                    if len(raw) != len(PREDICTION_HEADER):
+                        _record_error(
+                            errors,
+                            error_counts,
+                            "row width",
+                            f"expected {len(PREDICTION_HEADER)} columns; "
+                            f"got {len(raw)}: {raw!r}",
+                        )
+                        continue
+                    word_id_text, wordform_id_text, gramset, rank_text, score_text = raw
+                    word_id = _parse_positive_int(word_id_text)
+                    wordform_id = _parse_positive_int(wordform_id_text)
+                    rank = _parse_positive_int(rank_text)
+                    score = _parse_score(score_text)
+                    if word_id is None:
+                        _record_error(
+                            errors,
+                            error_counts,
+                            "invalid word_id",
+                            f"word_id={word_id_text!r}",
+                        )
+                    if wordform_id is None:
+                        _record_error(
+                            errors,
+                            error_counts,
+                            "invalid wordform_id",
+                            f"wordform_id={wordform_id_text!r}",
+                        )
+                    if gramset == "":
+                        _record_error(
+                            errors,
+                            error_counts,
+                            "empty gramset",
+                            f"word_id={word_id_text!r}; gramset={gramset!r}",
+                        )
+                    elif gramset.strip() == "":
+                        _record_error(
+                            errors,
+                            error_counts,
+                            "empty gramset",
+                            f"word_id={word_id_text!r}; gramset={gramset!r}",
+                        )
+                    if rank is None:
+                        _record_error(
+                            errors,
+                            error_counts,
+                            "invalid rank",
+                            f"rank={rank_text!r}",
+                        )
+                    if score is None:
+                        _record_error(
+                            errors,
+                            error_counts,
+                            "invalid score",
+                            f"word_id={word_id_text!r}; score={score_text!r}",
+                        )
+                    if (
+                        word_id is None
+                        or wordform_id is None
+                        or gramset.strip() == ""
+                        or rank is None
+                        or score is None
+                    ):
+                        continue
+                    identity = (word_id, wordform_id, gramset)
+                    if identity in seen_identities:
+                        _record_error(
+                            errors,
+                            error_counts,
+                            "duplicate candidate",
+                            f"{identity!r}",
+                        )
+                    else:
+                        seen_identities.add(identity)
+                    row = _PredictionRow(word_id, wordform_id, gramset, rank, score)
+                    rows.append(row)
+                    rows_by_word.setdefault(word_id, []).append(row)
+    except csv.Error as exc:
+        raise PredictionCsvParseError(
+            f"cannot parse predictions CSV: {predictions_path}: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise PredictionFileReadError(
+            f"cannot read predictions file: {predictions_path}: {exc}"
+        ) from exc
 
     predicted_word_ids = set(rows_by_word)
     predicted_candidate_count = len(rows)
