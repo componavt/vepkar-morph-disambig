@@ -3,7 +3,9 @@ import csv
 import subprocess
 import sys
 import tomllib
+from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,7 +18,11 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from test_splits import GIT_AVAILABLE, _tagged_checkout  # noqa: E402
 from core.data import SUPPORTED_LANGUAGES, read_corpus_tables  # noqa: E402
-from core.frequency import build_train_frequency, rank_by_train_frequency  # noqa: E402
+from core.frequency import (  # noqa: E402
+    FrequencyPrediction,
+    build_train_frequency,
+    rank_by_train_frequency,
+)
 from core.instances import build_language_instances  # noqa: E402
 from core.predictions import validate_predictions  # noqa: E402
 
@@ -860,6 +866,39 @@ def test_frequency_baseline_output_is_directory(tmp_path):
     _write_split_parts(split_file, instances)
     output = tmp_path / "outdir"
     output.mkdir()
+    (output / "keep.txt").write_text("keep", encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in output.iterdir()}
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "dev",
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "error: output path is a directory:" in result.stderr
+    assert f"  {output}" in result.stderr
+    assert output.is_dir()
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == before
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    assert "Frequency baseline: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_broken_symlink_protected(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    output = tmp_path / "frequency.csv"
+    missing_target = tmp_path / "missing-target.csv"
+
+    try:
+        output.symlink_to(missing_target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is unavailable in this environment")
+
     result = run_cli(
         "frequency-baseline",
         "--split", "dev",
@@ -869,9 +908,177 @@ def test_frequency_baseline_output_is_directory(tmp_path):
     )
     assert result.returncode == 1
     assert str(output) in result.stderr
-    assert output.is_dir()
+    assert "already exists" in result.stderr
+    assert output.is_symlink()
+    assert output.readlink() == missing_target
+    assert not missing_target.exists()
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    assert "Frequency baseline: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_frequency_baseline_missing_checkout_before_existing_output(tmp_path):
+    missing = tmp_path / "missing-dictorpus-data"
+    output = tmp_path / "out.csv"
+    original = "word_id,wordform_id,gramset,rank,score\n501,9001,SG+NOM,1,1\n"
+    output.write_text(original, encoding="utf-8")
+    result = run_cli(
+        "frequency-baseline",
+        "--split", "dev",
+        "--output", str(output),
+        "--data-dir", str(missing),
+    )
+    assert result.returncode == 1
+    assert "dictorpus-data" in result.stderr
+    assert str(missing) in result.stderr
+    assert "already exists" not in result.stderr
+    assert output.read_text(encoding="utf-8") == original
     assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_frequency_baseline_existing_output_rejected_before_loading(
+    tmp_path, monkeypatch, capsys
+):
+    import cli as cli_pkg
+
+    checkout = _tagged_checkout(tmp_path)
+    split_file = tmp_path / "splits_dev.csv"
+    split_file.write_text("language,text_id,split\n", encoding="utf-8")
+    output = tmp_path / "frequency-dev.csv"
+    output.write_text("original", encoding="utf-8")
+
+    def fail_tables(lang, data_dir):
+        raise AssertionError("read_corpus_tables must not be called")
+
+    resolved = []
+    real_tag = cli_pkg.determine_data_tag
+    monkeypatch.setattr(cli_pkg, "read_corpus_tables", fail_tables)
+    monkeypatch.setattr(
+        cli_pkg,
+        "determine_data_tag",
+        lambda data_dir: resolved.append(True) or real_tag(data_dir),
+    )
+    status = cli_pkg._run_frequency_baseline(
+        argparse.Namespace(
+            split="dev",
+            output=output,
+            data_dir=checkout,
+            split_file=split_file,
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert resolved == [True]
+    assert "already exists" in captured.err
+    assert str(output) in captured.err
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
+    import cli as cli_pkg
+
+    checkout = _tagged_checkout(tmp_path)
+    split_file = tmp_path / "splits_dev.csv"
+    split_file.write_text("language,text_id,split\n", encoding="utf-8")
+
+    class EmptyInstances:
+        instances = ()
+
+    monkeypatch.setattr(
+        cli_pkg, "read_corpus_tables", lambda lang, data_dir: object()
+    )
+    monkeypatch.setattr(
+        cli_pkg,
+        "build_language_instances",
+        lambda lang, tables: EmptyInstances(),
+    )
+    monkeypatch.setattr(cli_pkg, "_read_split_rows", lambda path: ())
+
+    valid = SimpleNamespace(
+        is_valid=True,
+        split="dev",
+        expected_word_count=2801,
+        expected_candidate_count=6950,
+        predicted_word_count=2800,
+        predicted_candidate_count=6949,
+        error_counts={},
+        errors={},
+    )
+    monkeypatch.setattr(cli_pkg, "validate_predictions", lambda **kwargs: valid)
+
+    status = cli_pkg._run_validate_predictions(
+        argparse.Namespace(
+            predictions=tmp_path / "predictions.csv",
+            split="dev",
+            data_dir=checkout,
+            split_file=split_file,
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert "Validated: 2,801 word instances, 6,950 candidate rows" in captured.out
+
+    failed = SimpleNamespace(
+        split="dev",
+        expected_word_count=2801,
+        expected_candidate_count=6950,
+        predicted_word_count=2800,
+        predicted_candidate_count=6949,
+        error_counts={"missing candidate": 6950, "invalid score": 1},
+        errors={
+            "missing candidate": ("word_id=1; candidate=(2, 'X')",),
+            "invalid score": ("word_id=1; score='nan'",),
+        },
+    )
+    cli_pkg._print_validation_failure(failed)
+    captured = capsys.readouterr()
+    assert "Expected: 2,801 word instances, 6,950 candidate rows" in captured.out
+    assert "Found: 2,800 word instances, 6,949 prediction rows" in captured.out
+    assert "missing candidate: 6,950 violations" in captured.out
+    assert "invalid score: 1 violation" in captured.out
+    assert "invalid score: 1 violations" not in captured.out
+
+    rows = tuple(
+        FrequencyPrediction(
+            word_id=(index % 2826) + 1,
+            wordform_id=index + 1,
+            gramset="G",
+            rank=1,
+            score=0,
+        )
+        for index in range(6961)
+    )
+    frequency = Counter({(index, "G"): 1 for index in range(7313)})
+    frequency[(99999, "G")] += 22390 - 7313
+    monkeypatch.setattr(
+        cli_pkg,
+        "rank_by_train_frequency",
+        lambda instances, split_rows, split: rows,
+    )
+    monkeypatch.setattr(
+        cli_pkg,
+        "build_train_frequency",
+        lambda instances, split_rows: frequency,
+    )
+
+    output = tmp_path / "frequency-out.csv"
+    status = cli_pkg._run_frequency_baseline(
+        argparse.Namespace(
+            split="dev",
+            output=output,
+            data_dir=checkout,
+            split_file=split_file,
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert "Training gold occurrences: 22,390" in captured.out
+    assert "Distinct train candidate keys: 7,314" in captured.out
+    assert "Generated: 2,826 word instances, 6,961 candidate rows" in captured.out
+    assert "Traceback" not in captured.err
 
 
 def test_frequency_baseline_rejects_train(tmp_path):
