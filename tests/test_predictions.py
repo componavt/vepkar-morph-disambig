@@ -12,6 +12,7 @@ sys.path.insert(0, str(SRC))
 
 from core.instances import Candidate, Instance  # noqa: E402
 from core.predictions import (  # noqa: E402
+    BenchmarkIntegrityError,
     PredictionCsvParseError,
     PredictionFileReadError,
     validate_predictions,
@@ -397,7 +398,7 @@ def test_duplicate_benchmark_word_id(tmp_path):
         ),
     )
 
-    with pytest.raises(RuntimeError, match="duplicate word_id"):
+    with pytest.raises(BenchmarkIntegrityError, match="duplicate word_id"):
         validate_predictions(
             tmp_path / "not-opened.csv",
             "train",
