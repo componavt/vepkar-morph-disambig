@@ -552,6 +552,14 @@ def _run_validate_predictions(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     try:
+        with args.predictions.open("rb"):
+            pass
+    except OSError as exc:
+        print("error: cannot read predictions file:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    try:
         context = load_benchmark_context(data_dir, tag, args.split_file)
     except DataError:
         return 1

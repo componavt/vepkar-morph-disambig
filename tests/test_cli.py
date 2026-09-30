@@ -355,6 +355,78 @@ def test_validate_predictions_directory_path(tmp_path):
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_validate_predictions_unreadable_bypasses_benchmark_loading(
+    tmp_path, monkeypatch, capsys, kind
+):
+    import cli as cli_pkg
+
+    checkout = _tagged_checkout(tmp_path)
+    if kind == "directory":
+        predictions = tmp_path / "predictions_dir"
+        predictions.mkdir()
+    else:
+        predictions = tmp_path / "missing.csv"
+
+    def forbidden_load(*args, **kwargs):
+        pytest.fail("Benchmark loading must not occur for an unreadable prediction path")
+
+    monkeypatch.setattr(cli_pkg, "load_benchmark_context", forbidden_load)
+    status = cli_pkg._run_validate_predictions(
+        argparse.Namespace(
+            predictions=predictions,
+            split="dev",
+            data_dir=checkout,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "cannot read predictions file" in captured.err
+    assert str(predictions) in captured.err
+    assert "OK" not in captured.out
+    assert "FAILED" not in captured.out
+
+
+class _RecordingPath(Path):
+    opened = False
+
+    def open(self, *args, **kwargs):
+        _RecordingPath.opened = True
+        return super().open(*args, **kwargs)
+
+
+def test_validate_predictions_missing_checkout_priority_skips_open(
+    tmp_path, monkeypatch, capsys
+):
+    import cli as cli_pkg
+
+    missing_checkout = tmp_path / "missing-dictorpus-data"
+    _RecordingPath.opened = False
+    predictions = _RecordingPath(tmp_path / "missing-predictions.csv")
+
+    def forbidden_load(*args, **kwargs):
+        pytest.fail("Benchmark loading must not occur")
+
+    monkeypatch.setattr(cli_pkg, "load_benchmark_context", forbidden_load)
+    status = cli_pkg._run_validate_predictions(
+        argparse.Namespace(
+            predictions=predictions,
+            split="dev",
+            data_dir=missing_checkout,
+            split_file=tmp_path / "missing-splits.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "dictorpus-data" in captured.err
+    assert str(missing_checkout) in captured.err
+    assert "cannot read predictions file" not in captured.err
+    assert _RecordingPath.opened is False
+    assert "Predictions validation" not in captured.out
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 def test_validate_predictions_malformed_csv(tmp_path):
     checkout = _tagged_checkout(tmp_path)
     instances = _strict_instances(checkout)
@@ -415,9 +487,13 @@ def test_validate_predictions_invalid_file_reports_failed(tmp_path):
 def test_validate_predictions_missing_split_file(tmp_path):
     checkout = _tagged_checkout(tmp_path)
     missing_split = tmp_path / "missing-splits.csv"
+    predictions = tmp_path / "predictions.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
     result = run_cli(
         "validate-predictions",
-        "--predictions", str(tmp_path / "predictions.csv"),
+        "--predictions", str(predictions),
         "--split", "dev",
         "--data-dir", str(checkout),
         "--split-file", str(missing_split),
@@ -458,6 +534,10 @@ def test_validate_predictions_benchmark_integrity_failure(tmp_path, monkeypatch,
     checkout = _tagged_checkout(tmp_path)
     split_file = tmp_path / "splits_dev.csv"
     split_file.write_text("language,text_id,split\nkrl,1,dev\n", encoding="utf-8")
+    predictions = tmp_path / "predictions.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
 
     def stub_tables(lang, data_dir):
         return object()
@@ -484,7 +564,7 @@ def test_validate_predictions_benchmark_integrity_failure(tmp_path, monkeypatch,
     )
     status = cli_pkg._run_validate_predictions(
         argparse.Namespace(
-            predictions=tmp_path / "predictions.csv",
+            predictions=predictions,
             split="dev",
             data_dir=checkout,
             split_file=split_file,
@@ -997,6 +1077,11 @@ def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setattr(cli_pkg, "_read_split_rows", lambda path: ())
 
+    predictions = tmp_path / "predictions.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
+
     valid = SimpleNamespace(
         is_valid=True,
         split="dev",
@@ -1011,7 +1096,7 @@ def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
 
     status = cli_pkg._run_validate_predictions(
         argparse.Namespace(
-            predictions=tmp_path / "predictions.csv",
+            predictions=predictions,
             split="dev",
             data_dir=checkout,
             split_file=split_file,
