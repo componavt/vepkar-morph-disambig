@@ -1,4 +1,4 @@
-🌐 [Читать на русском](README.ru.md)
+🌐 [Read in Russian](README.ru.md)
 
 # vepkar-morph-disambig
 
@@ -31,7 +31,7 @@ Fetch the source data from [dictorpus-data](https://github.com/componavt/dictorp
 python src/cli.py fetch-data v2026.09
 ```
 
-Inspect the corpus, build benchmark instances, and create a split:
+Inspect the corpus, build a set of instances, and create a split:
 
 ```bash
 python src/cli.py inspect-data krl
@@ -44,3 +44,12 @@ Language codes: `vep` — Vepsian, `krl` — Karelian Proper,
 
 The generated split is described in
 [data/derived/README.md](data/derived/README.md).
+
+## Quality evaluation
+
+A frequency baseline is implemented: candidates are ranked by the frequency
+of expert analyses in the training split. Quality is evaluated separately
+on `dev` and `test`.
+
+[How to run and compute metrics](docs/evaluation.md).
+[Frequency baseline results](docs/frequency_baseline.md).
