@@ -46,10 +46,8 @@ An existing output file is not overwritten. To run the command again,
 choose a new path or delete the previous file if it is no longer needed.
 Files in `/tmp/` are intended for temporary storage.
 
-`validate-predictions` separately checks that the predictions are
-complete and valid. `evaluate-predictions` repeats this check before
-computing metrics. The separate validation command is useful for
-diagnostics, but is not required.
+`validate-predictions` checks prediction completeness and validity.
+`evaluate-predictions` performs the same check before computing metrics.
 
 Validation and evaluation do not modify the predictions file and do not
 save new results.
@@ -61,6 +59,9 @@ save new results.
 Every evaluated word occurrence has the same weight. The correct
 candidate is identified by the exact `(wordform_id, gramset)` pair
 selected by the expert.
+
+The evaluation ranks existing candidates. The correct candidate is the
+one selected by the expert; no new candidates are created.
 
 - `Top-1 accuracy` — the proportion of word occurrences for which the
   correct candidate is ranked first.
