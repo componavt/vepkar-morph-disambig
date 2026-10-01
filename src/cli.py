@@ -21,9 +21,15 @@ from core.data import (
 )
 from core.fetch import FetchError, fetch_data
 from core.frequency import (
+    FrequencyPrediction,
     TargetSplitError,
     build_train_frequency,
     rank_by_train_frequency,
+)
+from core.metrics import (
+    MetricsInputError,
+    RankingMetrics,
+    compute_ranking_metrics,
 )
 from core.instances import (
     DEFAULT_OUTPUT_DIR,
@@ -173,6 +179,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
     )
     baseline.add_argument(
+        "--split-file",
+        type=Path,
+        default=None,
+        help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
+    )
+    evaluate = commands.add_parser(
+        "evaluate-predictions",
+        help="Evaluate one validated predictions CSV against a benchmark split",
+    )
+    evaluate.add_argument(
+        "--predictions",
+        type=Path,
+        required=True,
+        help="Path to the predictions CSV to evaluate",
+    )
+    evaluate.add_argument(
+        "--split",
+        choices=("dev", "test"),
+        required=True,
+        help="Benchmark split the predictions file belongs to",
+    )
+    evaluate.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    evaluate.add_argument(
         "--split-file",
         type=Path,
         default=None,
@@ -601,6 +635,169 @@ def _run_validate_predictions(args: argparse.Namespace) -> int:
     return 1
 
 
+def load_ranked_predictions(path: Path) -> list[FrequencyPrediction]:
+    """Read an already validated predictions CSV into ranked prediction rows."""
+    rows: list[FrequencyPrediction] = []
+
+    try:
+        with path.open("r", encoding="utf-8", newline="") as fh:
+            reader = csv.reader(fh, strict=True)
+
+            header = next(reader, None)
+            if tuple(header or ()) != PREDICTION_HEADER:
+                raise PredictionCsvParseError(
+                    f"cannot parse predictions CSV {path}: unexpected header "
+                    f"{header!r}",
+                )
+
+            for raw in reader:
+                if len(raw) != 5:
+                    raise PredictionCsvParseError(
+                        f"cannot parse predictions CSV {path}: "
+                        f"invalid row {raw!r}",
+                    )
+
+                try:
+                    word_id = int(raw[0])
+                    wordform_id = int(raw[1])
+                    rank = int(raw[3])
+                    score = float(raw[4])
+                except ValueError as exc:
+                    raise PredictionCsvParseError(
+                        f"cannot parse predictions CSV {path}: "
+                        f"invalid row {raw!r}",
+                    ) from exc
+
+                rows.append(
+                    FrequencyPrediction(
+                        word_id=word_id,
+                        wordform_id=wordform_id,
+                        gramset=raw[2],
+                        rank=rank,
+                        score=score,
+                    )
+                )
+    except csv.Error as exc:
+        raise PredictionCsvParseError(
+            f"cannot parse predictions CSV {path}: {exc}",
+        ) from exc
+    except OSError as exc:
+        raise PredictionFileReadError(
+            f"cannot read predictions file {path}",
+        ) from exc
+
+    return rows
+
+
+def print_evaluation_report(
+    *,
+    split: str,
+    predictions_path: Path,
+    word_count: int,
+    candidate_count: int,
+    metrics: RankingMetrics,
+) -> None:
+    print("Prediction evaluation: OK")
+    print(f"Predictions: {predictions_path}")
+    print(f"Split: {split}")
+    print(
+        f"Evaluated: {word_count} word instances, "
+        f"{candidate_count} candidate rows"
+    )
+    print()
+    print("Metric             Value")
+    print(f"Top-1 accuracy     {metrics.top1_accuracy:.4f}")
+    print(f"MRR                {metrics.mrr:.4f}")
+    print(f"Top-3 accuracy     {metrics.top3_accuracy:.4f}")
+
+
+def run_evaluate_predictions(args: argparse.Namespace) -> int:
+    data_dir = resolve_data_dir(args.data_dir)
+
+    try:
+        require_local_corpus(data_dir)
+        tag = determine_data_tag(data_dir)
+    except (CorpusTagError, DataError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    instances: list[Instance] = []
+
+    for language in SUPPORTED_LANGUAGES:
+        try:
+            tables = read_corpus_tables(language, data_dir)
+            result = build_language_instances(language, tables)
+        except DataError as exc:
+            print(f"{language}: FAILED: {exc}", file=sys.stderr, flush=True)
+            return 1
+
+        instances.extend(result.instances)
+
+    split_path = (
+        args.split_file
+        if args.split_file is not None
+        else split_csv_path(DEFAULT_SPLIT_OUTPUT_DIR, tag)
+    )
+
+    try:
+        split_rows = _read_split_rows(split_path)
+    except SplitError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        validation = validate_predictions(
+            predictions_path=args.predictions,
+            split=args.split,
+            instances=instances,
+            split_rows=split_rows,
+        )
+    except PredictionFileReadError as exc:
+        print("error: cannot read predictions file", file=sys.stderr)
+        print(args.predictions, file=sys.stderr)
+        if exc.__cause__ is not None:
+            print(exc.__cause__, file=sys.stderr)
+        return 1
+    except PredictionCsvParseError as exc:
+        print("error: cannot parse predictions CSV", file=sys.stderr)
+        print(args.predictions, file=sys.stderr)
+        if exc.__cause__ is not None:
+            print(exc.__cause__, file=sys.stderr)
+        return 1
+    except BenchmarkIntegrityError as exc:
+        print(
+            "error: strict benchmark is internally inconsistent",
+            file=sys.stderr,
+        )
+        print(exc, file=sys.stderr)
+        return 1
+
+    if not validation.is_valid:
+        _print_validation_failure(validation)
+        return 1
+
+    prediction_rows = load_ranked_predictions(args.predictions)
+
+    try:
+        metrics = compute_ranking_metrics(
+            instances,
+            prediction_rows,
+        )
+    except MetricsInputError as exc:
+        print("error: cannot compute ranking metrics", file=sys.stderr)
+        print(exc, file=sys.stderr)
+        return 1
+
+    print_evaluation_report(
+        split=args.split,
+        predictions_path=args.predictions,
+        word_count=validation.expected_word_count,
+        candidate_count=validation.expected_candidate_count,
+        metrics=metrics,
+    )
+    return 0
+
+
 def _run_frequency_baseline(args: argparse.Namespace) -> int:
     output_path = Path(args.output)
     try:
@@ -766,6 +963,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_validate_predictions(args)
     if args.command == "frequency-baseline":
         return _run_frequency_baseline(args)
+    if args.command == "evaluate-predictions":
+        return run_evaluate_predictions(args)
     parser.print_help()
     return 0
 
