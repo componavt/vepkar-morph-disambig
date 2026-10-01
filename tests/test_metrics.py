@@ -308,13 +308,67 @@ def test_duplicate_prediction_candidate():
         compute_ranking_metrics([instance], rows + [duplicate])
 
 
+def test_non_strict_candidate_rejected():
+    instance, rows = _ranked(
+        601, [Candidate(100, "A"), Candidate(101, "B")]
+    )
+    extra = FrequencyPrediction(
+        word_id=601,
+        wordform_id=999,
+        gramset="MADE-UP",
+        rank=3,
+        score=0,
+    )
+    with pytest.raises(MetricsInputError, match="strict benchmark") as excinfo:
+        compute_ranking_metrics([instance], rows + [extra])
+    assert "word_id=601" in str(excinfo.value)
+
+
+def test_missing_non_gold_strict_candidate_rejected():
+    instance, rows = _ranked(
+        601,
+        [Candidate(100, "A"), Candidate(101, "B"), Candidate(102, "C")],
+        gold=Candidate(100, "A"),
+    )
+    incomplete_rows = [rows[0]]
+    with pytest.raises(MetricsInputError, match="incomplete"):
+        compute_ranking_metrics([instance], incomplete_rows)
+
+
+def test_missing_prediction_word_rejected():
+    first, first_rows = _ranked(
+        601, [Candidate(100, "A"), Candidate(101, "B")]
+    )
+    second, _ = _ranked(
+        602, [Candidate(200, "A"), Candidate(201, "B")]
+    )
+    with pytest.raises(MetricsInputError, match="incomplete") as excinfo:
+        compute_ranking_metrics([first, second], first_rows)
+    assert "word_id=602" in str(excinfo.value)
+
+
+def test_complete_valid_input_unchanged():
+    instance, rows = _ranked(
+        601,
+        [Candidate(100, "A"), Candidate(101, "B"), Candidate(102, "C")],
+        gold=Candidate(101, "B"),
+    )
+    result = compute_ranking_metrics([instance], rows)
+    assert result.word_count == 1
+    assert result.top1_correct == 0
+    assert result.top3_correct == 1
+    assert result.top1_accuracy == 0.0
+    assert result.mrr == pytest.approx(1 / 2)
+    assert result.top3_accuracy == 1.0
+
+
 def test_missing_gold_candidate():
     instance, rows = _ranked(
         601, [Candidate(100, "A"), Candidate(101, "B")],
         gold=Candidate(101, "B"),
     )
     rows = [row for row in rows if row.gramset != "B"]
-    with pytest.raises(MetricsInputError, match="missing from predictions"):
+    with pytest.raises(MetricsInputError, match="incomplete"):
         compute_ranking_metrics([instance], rows)
 
 
