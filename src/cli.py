@@ -778,9 +778,20 @@ def run_evaluate_predictions(args: argparse.Namespace) -> int:
 
     prediction_rows = load_ranked_predictions(args.predictions)
 
+    split_texts = {
+        (language, text_id)
+        for language, text_id, split in split_rows
+        if split == args.split
+    }
+    evaluation_instances = [
+        instance
+        for instance in instances
+        if (instance.language, instance.text_id) in split_texts
+    ]
+
     try:
         metrics = compute_ranking_metrics(
-            instances,
+            evaluation_instances,
             prediction_rows,
         )
     except MetricsInputError as exc:

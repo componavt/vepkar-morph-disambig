@@ -1436,3 +1436,143 @@ def test_evaluate_predictions_metrics_match_hand_calculated(tmp_path):
     assert "MRR                0.5000" in result.stdout
     assert "Top-3 accuracy     1.0000" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+def _text_keys(instances) -> list[tuple[str, int]]:
+    return sorted({(inst.language, int(inst.text_id)) for inst in instances})
+
+
+def _write_split_parts_fixture(path: Path, instances, part_by_text) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["language", "text_id", "split"])
+        for language, text_id in _text_keys(instances):
+            writer.writerow((language, text_id, part_by_text[(language, text_id)]))
+
+
+def _instances_in_part(instances, part_by_text, part) -> list:
+    return [
+        inst
+        for inst in instances
+        if part_by_text[(inst.language, int(inst.text_id))] == part
+    ]
+
+
+def _evaluate_partial_split(tmp_path, part: str):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    keys = _text_keys(instances)
+    split_key = keys[0]
+    part_by_text = {
+        key: (part if key == split_key else "train") for key in keys
+    }
+    split_file = tmp_path / f"splits_{part}_partial.csv"
+    _write_split_parts_fixture(split_file, instances, part_by_text)
+    target = _instances_in_part(instances, part_by_text, part)
+    predictions = tmp_path / f"predictions_{part}_partial.csv"
+    _write_valid_predictions(predictions, target)
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(predictions),
+        "--split", part,
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    return result, target
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_uses_only_selected_split_words(tmp_path):
+    result, target = _evaluate_partial_split(tmp_path, "dev")
+    word_count = len(target)
+    candidate_count = sum(len(inst.candidates) for inst in target)
+    assert result.returncode == 0, result.stderr
+    assert "Prediction evaluation: OK" in result.stdout
+    assert "Split: dev" in result.stdout
+    assert (
+        f"Evaluated: {word_count} word instances, "
+        f"{candidate_count} candidate rows"
+    ) in result.stdout
+    assert "Top-1 accuracy" in result.stdout
+    assert "MRR" in result.stdout
+    assert "Top-3 accuracy" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_dev_test_isolated(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    part_by_text = {
+        key: ("dev" if index % 2 == 0 else "test")
+        for index, key in enumerate(_text_keys(instances))
+    }
+    split_file = tmp_path / "splits_both.csv"
+    _write_split_parts_fixture(split_file, instances, part_by_text)
+    dev_instances = _instances_in_part(instances, part_by_text, "dev")
+    test_instances = _instances_in_part(instances, part_by_text, "test")
+    assert dev_instances
+    assert test_instances
+    dev_predictions = tmp_path / "predictions_dev.csv"
+    _write_valid_predictions(dev_predictions, dev_instances)
+    test_predictions = tmp_path / "predictions_test.csv"
+    _write_valid_predictions(test_predictions, test_instances)
+
+    dev_result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(dev_predictions),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert dev_result.returncode == 0, dev_result.stderr
+    assert "Split: dev" in dev_result.stdout
+    assert (
+        f"Evaluated: {len(dev_instances)} word instances, "
+        f"{sum(len(inst.candidates) for inst in dev_instances)} candidate rows"
+    ) in dev_result.stdout
+    assert "Traceback" not in dev_result.stderr
+
+    test_result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(test_predictions),
+        "--split", "test",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert test_result.returncode == 0, test_result.stderr
+    assert "Split: test" in test_result.stdout
+    assert (
+        f"Evaluated: {len(test_instances)} word instances, "
+        f"{sum(len(inst.candidates) for inst in test_instances)} candidate rows"
+    ) in test_result.stdout
+    assert "Traceback" not in test_result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_missing_candidate_still_fails_validation(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    keys = _text_keys(instances)
+    part_by_text = {key: ("test" if key == keys[0] else "train") for key in keys}
+    split_file = tmp_path / "splits_strict.csv"
+    _write_split_parts_fixture(split_file, instances, part_by_text)
+    target = _instances_in_part(instances, part_by_text, "test")
+    partial = [
+        [inst.word_id, inst.candidates[0].wordform_id, inst.candidates[0].gramset, 1, 1]
+        for inst in sorted(target, key=lambda inst: inst.word_id)
+    ]
+    predictions = tmp_path / "predictions_partial.csv"
+    _write_predictions(predictions, partial)
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(predictions),
+        "--split", "test",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "Predictions validation: FAILED" in result.stdout
+    assert "missing candidate" in result.stdout
+    assert "Prediction evaluation: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
