@@ -1212,3 +1212,227 @@ def test_frequency_baseline_missing_split_file(tmp_path):
     assert str(missing_split) in result.stderr
     assert not output.exists()
     assert "Traceback" not in result.stderr
+
+
+def _run_evaluate(tmp_path: Path, part: str, rows=None) -> subprocess.CompletedProcess:
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / f"splits_{part}.csv"
+    _write_split_fixture(split_file, instances, part)
+    predictions = tmp_path / f"predictions_{part}.csv"
+    if rows is None:
+        _write_valid_predictions(predictions, instances)
+    else:
+        _write_predictions(predictions, rows(instances))
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(predictions),
+        "--split", part,
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    return result, instances, predictions
+
+
+def _assert_evaluation_report(result, instances, part, predictions) -> None:
+    word_count, candidate_count = _expected_counts(instances)
+    assert result.returncode == 0, result.stderr
+    assert "Prediction evaluation: OK" in result.stdout
+    assert f"Predictions: {predictions}" in result.stdout
+    assert f"Split: {part}" in result.stdout
+    assert (
+        f"Evaluated: {word_count} word instances, "
+        f"{candidate_count} candidate rows"
+    ) in result.stdout
+    assert "Top-1 accuracy" in result.stdout
+    assert "MRR" in result.stdout
+    assert "Top-3 accuracy" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_dev_ok(tmp_path):
+    result, instances, predictions = _run_evaluate(tmp_path, "dev")
+    _assert_evaluation_report(result, instances, "dev", predictions)
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_test_ok(tmp_path):
+    result, instances, predictions = _run_evaluate(tmp_path, "test")
+    _assert_evaluation_report(result, instances, "test", predictions)
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_invalid_file_fails(tmp_path):
+    result, instances, predictions = _run_evaluate(tmp_path, "dev")
+    lines = predictions.read_text(encoding="utf-8").splitlines()
+    predictions.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(predictions),
+        "--split", "dev",
+        "--data-dir", str(tmp_path / "checkout"),
+        "--split-file", str(tmp_path / "splits_dev.csv"),
+    )
+    assert result.returncode == 1
+    assert "Predictions validation: FAILED" in result.stdout
+    assert "Prediction evaluation: OK" not in result.stdout
+    assert "Top-1 accuracy" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_missing_predictions_file(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_fixture(split_file, instances, "dev")
+    missing = tmp_path / "missing.csv"
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(missing),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "cannot read predictions file" in result.stderr
+    assert str(missing) in result.stderr
+    assert "Prediction evaluation: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_malformed_csv(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_fixture(split_file, instances, "dev")
+    predictions = tmp_path / "malformed.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n"
+        '501,9001,"SG+NOM,1,125\n',
+        encoding="utf-8",
+    )
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(predictions),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "cannot parse predictions CSV" in result.stderr
+    assert str(predictions) in result.stderr
+    assert "Prediction evaluation: OK" not in result.stdout
+    assert "Top-1 accuracy" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_evaluate_predictions_missing_checkout_checked_first(tmp_path):
+    missing = tmp_path / "missing-dictorpus-data"
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(tmp_path / "missing-predictions.csv"),
+        "--split", "dev",
+        "--data-dir", str(missing),
+        "--split-file", str(tmp_path / "missing-splits.csv"),
+    )
+    assert result.returncode == 1
+    assert "dictorpus-data" in result.stderr
+    assert str(missing) in result.stderr
+    assert "cannot read predictions file" not in result.stderr
+    assert "cannot read split file" not in result.stderr
+    assert "Prediction evaluation" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_missing_split_file(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    missing_split = tmp_path / "missing-splits.csv"
+    predictions = tmp_path / "predictions.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(predictions),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(missing_split),
+    )
+    assert result.returncode == 1
+    assert "cannot read split file" in result.stderr
+    assert str(missing_split) in result.stderr
+    assert "Prediction evaluation: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_evaluate_predictions_rejects_train(tmp_path):
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(tmp_path / "predictions.csv"),
+        "--split", "train",
+    )
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
+    assert "train" in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_writes_no_files(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_fixture(split_file, instances, "dev")
+    predictions = tmp_path / "predictions_dev.csv"
+    _write_valid_predictions(predictions, instances)
+    repo_before = _repo_snapshot()
+    checkout_before = _checkout_snapshot(checkout)
+    result = run_cli(
+        "evaluate-predictions",
+        "--predictions", str(predictions),
+        "--split", "dev",
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 0, result.stderr
+    assert _repo_snapshot() == repo_before
+    assert _checkout_snapshot(checkout) == checkout_before
+
+
+def _reversed_prediction_rows(instances) -> list[list]:
+    rows = []
+    for instance in sorted(
+        instances, key=lambda inst: (inst.language, inst.word_id)
+    ):
+        candidates = list(instance.candidates)
+        for rank, candidate in enumerate(reversed(candidates), start=1):
+            rows.append(
+                [
+                    instance.word_id,
+                    candidate.wordform_id,
+                    candidate.gramset,
+                    rank,
+                    len(candidates) - rank + 1,
+                ]
+            )
+    return rows
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_evaluate_predictions_metrics_match_hand_calculated(tmp_path):
+    result, instances, _ = _run_evaluate(
+        tmp_path, "dev", _reversed_prediction_rows
+    )
+    word_count, candidate_count = _expected_counts(instances)
+    assert result.returncode == 0, result.stderr
+    assert (
+        f"Evaluated: {word_count} word instances, "
+        f"{candidate_count} candidate rows"
+    ) in result.stdout
+    assert "Top-1 accuracy     0.0000" in result.stdout
+    assert "MRR                0.5000" in result.stdout
+    assert "Top-3 accuracy     1.0000" in result.stdout
+    assert "Traceback" not in result.stderr
