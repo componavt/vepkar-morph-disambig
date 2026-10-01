@@ -7,8 +7,8 @@ This project studies contextual ranking of candidate morphological analyses in t
 The repository covers three research directions:
 
 - `src/t1_features/` — feature-based models;
-- `src/t2_context/` — context-based models;
-- `src/t3_transfer/` — transfer learning between language varieties.
+- `src/t2_context/` — contextual models;
+- `src/t3_transfer/` — transfer learning between language varieties;
 
 Shared code is in `src/core/`.
 
@@ -44,6 +44,16 @@ Language codes: `vep` — Vepsian, `krl` — Karelian Proper,
 
 The generated split is described in
 [data/derived/README.md](data/derived/README.md).
+
+## Evaluation
+
+The repository includes a frequency baseline: it ranks the candidate
+analyses of each word occurrence by the frequency of expert analyses
+in the training split. Quality is evaluated separately on the `dev`
+and `test` splits.
+
+[Evaluation workflow and metrics](docs/evaluation.md).  
+[Frequency baseline results](docs/frequency_baseline.md).
 
 ## Quality evaluation
 

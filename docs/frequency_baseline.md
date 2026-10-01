@@ -1,17 +1,21 @@
-# Частотный базовый метод
+# Frequency baseline
 
-Результаты запуска 1 октября 2026 года.
+Results from the run on 1 October 2026.
 
-Кандидаты ранжируются по частоте экспертных разборов в `train`.
-Обучающая часть содержит 22 390 экспертных разборов и
-7 314 различных пар `(wordform_id, gramset)`.
+Candidates are ranked by the frequency of expert analyses in the
+`train` split. The training split contains 22,390 expert analyses and
+7,314 distinct `(wordform_id, gramset)` pairs.
 
-| Часть | Словоупотребления | Строки кандидатов | Top-1 accuracy | MRR | Top-3 accuracy |
+| Split | Word occurrences | Candidate rows | Top-1 accuracy | MRR | Top-3 accuracy |
 |---|---:|---:|---:|---:|---:|
-| dev | 2 826 | 6 961 | 0.7095 | 0.8454 | 0.9890 |
-| test | 2 801 | 6 950 | 0.7319 | 0.8584 | 0.9921 |
+| dev | 2,826 | 6,961 | 0.7095 | 0.8454 | 0.9890 |
+| test | 2,801 | 6,950 | 0.7319 | 0.8584 | 0.9921 |
 
-Оба файла прошли проверку при создании и отдельную проверку
-командой `validate-predictions`.
+Both prediction files passed validation when created and were checked
+separately with `validate-predictions`.
 
-[Порядок воспроизведения и определения метрик](evaluation.ru.md).
+Ties are resolved deterministically: the candidate with the smaller
+`wordform_id` is ranked higher; if `wordform_id` is also equal, the
+lexicographically smaller `gramset` is ranked higher.
+
+[Reproduction workflow and metric definitions](evaluation.md).

@@ -1,23 +1,23 @@
 🌐 [Read in Russian](evaluation.ru.md)
 
-# Quality evaluation
+# Evaluation
 
-This document describes building, validating, and evaluating a prediction file
-for `dev` or `test`.
+This document describes how to create, validate, and evaluate a
+predictions file for the `dev` or `test` split.
 
-## Before running
+## Before you start
 
 Run the commands from the repository root with the `.venv` environment
-activated. The source data must be fetched and the split file prepared;
-the commands are given in [README](../README.md).
+activated. The source data must be downloaded and the split file must
+be created; see the [README](../README.md).
 
-For the current dataset, `data/derived/splits_v2026.09.csv` is used.
-The split is described in
+The current dataset uses `data/derived/splits_v2026.09.csv`.
+For a description of the split, see
 [data/derived/README.md](../data/derived/README.md).
 
-## Full run procedure
+## Complete workflow
 
-Example for `test`:
+Example for the `test` split:
 
 ```bash
 python src/cli.py frequency-baseline \
@@ -33,51 +33,54 @@ python src/cli.py evaluate-predictions \
   --split test
 ```
 
-For `dev`, replace `--split test` with `--split dev` and use a different
-output file, for example `/tmp/vepkar-frequency-dev-v2.csv`.
+For `dev`, replace `--split test` with `--split dev` and use a
+different output file, for example
+`/tmp/vepkar-frequency-dev-v2.csv`.
 
-`frequency-baseline` ranks all candidates of each word occurrence by the
-frequency of expert analyses in `train`, writes a CSV, and validates it.
-The expert answers for `dev` and `test` are not used for training.
+`frequency-baseline` ranks all candidates of each word occurrence by
+the frequency of expert analyses in `train`, writes a CSV file, and
+validates it. Expert answers from `dev` and `test` are not used for
+training.
 
-An existing output file is not overwritten. To rerun, choose a new path or
-delete the previous file if it is no longer needed. Files in `/tmp/` are
-intended for temporary storage.
+An existing output file is not overwritten. To run the command again,
+choose a new path or delete the previous file if it is no longer needed.
+Files in `/tmp/` are intended for temporary storage.
 
-`validate-predictions` separately checks the completeness and validity of
-predictions. `evaluate-predictions` repeats this check before computing
-metrics, so a separate validation call is useful for diagnostics but not
-required.
+`validate-predictions` separately checks that the predictions are
+complete and valid. `evaluate-predictions` repeats this check before
+computing metrics. The separate validation command is useful for
+diagnostics, but is not required.
 
-Validation and evaluation do not modify the prediction file and do not save
-new results.
+Validation and evaluation do not modify the predictions file and do not
+save new results.
 
 [CSV format and prediction requirements](../results/milestones/prediction-format.md).
 
 ## Metrics
 
-Every evaluated word occurrence has equal weight. The correct candidate is
-determined by the exact `(wordform_id, gramset)` pair chosen by the expert.
+Every evaluated word occurrence has the same weight. The correct
+candidate is identified by the exact `(wordform_id, gramset)` pair
+selected by the expert.
 
-- `Top-1 accuracy` — the fraction of word occurrences for which the correct
-  candidate is ranked first.
-- `MRR` — the mean reciprocal rank of the correct candidate: first place
-  gives 1, second — 1/2, third — 1/3.
-- `Top-3 accuracy` — the fraction of word occurrences for which the correct
-  candidate is among the first three positions. If there are fewer than three
-  candidates, all available positions are considered.
+- `Top-1 accuracy` — the proportion of word occurrences for which the
+  correct candidate is ranked first.
+- `MRR` — the mean reciprocal rank of the correct candidate: rank 1
+  contributes 1, rank 2 contributes 1/2, and rank 3 contributes 1/3.
+- `Top-3 accuracy` — the proportion of word occurrences for which the
+  correct candidate appears among the first three positions. If there
+  are fewer than three candidates, all available positions are counted.
 
-Metrics are printed as fractions from 0 to 1 with four decimal places.
-Only the output is rounded, not the underlying computations.
+The metrics are displayed as proportions from 0 to 1 with four decimal
+places. Only the displayed values are rounded; the underlying
+calculations remain unrounded.
 
 ## Comparing methods
 
-A correct comparison requires one version of the source data, one split file,
-the same evaluated word occurrences and candidate sets, the same metrics and
-weighting method.
+A valid comparison requires the same source-data version, split file,
+evaluated word occurrences, candidate sets, metrics, and weighting.
 
-Settings and method variants are selected on `dev`. The `test` set is used
-for the final evaluation, not for choosing settings. The results of the two
-splits are reported separately.
+Use `dev` to select settings and variants of a method. Use `test` for
+the final evaluation, not for selecting settings. Report the results
+for the two splits separately.
 
 [Frequency baseline results](frequency_baseline.md).
