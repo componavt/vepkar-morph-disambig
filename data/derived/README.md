@@ -1,4 +1,4 @@
-🌐 [Читать на русском](README.ru.md)
+🌐 [Read in Russian](README.ru.md)
 
 # Derived data
 
@@ -28,10 +28,9 @@ The file has three columns:
 Each row assigns an **entire text** to one split. All eligible word occurrences
 in that text inherit its assignment through the `(language, text_id)` pair.
 
-The target for each language variety is approximately 80% / 10% / 10% by the
-number of candidates in eligible instances. The proportions by number of
-texts or word occurrences may differ because a text cannot be split across
-parts.
+The target for each language variety is 80% / 10% / 10% by the number of
+candidate rows. The proportions by number of texts or word occurrences may
+differ because a text cannot be split across parts.
 
 - `train` — train a model;
 - `dev` — select its settings and variant;

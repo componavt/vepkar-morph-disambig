@@ -1,3 +1,5 @@
+🌐 [Read in Russian](README.ru.md)
+
 # Manual review queue
 
 Files named `zero_word_number_sentences_<tag>.csv` list sentences for manual review.
@@ -12,14 +14,15 @@ language,sentence_id
 
 Each row identifies a sentence; the CSV does not contain its text or XML.
 
-Illustrative `sentence_xml` with one word marked by a zero ID:
+Illustrative example of a sentence XML with a `<w id="0">` element (zero ID):
 
 ```xml
-<s id="1"><w id="1">The</w> <w id="0">cat</w> <w id="2">sleeps</w>.</s>
+<s id="1"><w id="1">Этот</w> <w id="0">кот</w> <w id="2">спит</w>.</s>
 ```
 
-This is a simplified example, not an actual corpus sentence. Review the affected
-word record together with the sentence XML; queue membership alone does not
-establish the cause of `word_number=0`.
+This is a simplified illustration, not an actual corpus sentence. During review,
+a word record must be matched against the sentence XML; queue membership alone
+does not explain the cause of `word_number=0`.
 
-These files are review queues, not training data for the frequency baseline.
+These lists are intended for manual review, not for training or evaluating
+models.

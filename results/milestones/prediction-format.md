@@ -1,4 +1,4 @@
-🌐 [Читать на русском](prediction-format.ru.md)
+🌐 [Read in Russian](prediction-format.ru.md)
 
 # Prediction format
 
@@ -30,15 +30,11 @@ The source-data field `relevance` is not included in prediction files. It is use
 
 ## One file, one split
 
-One prediction file belongs to exactly one split:
+One prediction file contains a complete ranking for one evaluation split:
+`dev` or `test`. Splits must not be mixed in one file.
 
-```text
-train
- dev
- test
-```
-
-The split is not stored in every CSV row. It is supplied to the validator:
+The split value is not repeated in every CSV row. It is passed to the
+validator as an argument:
 
 ```bash
 python src/cli.py validate-predictions \
@@ -127,27 +123,14 @@ Scores must be finite numbers and must agree with ranks:
 rank=1 score >= rank=2 score >= rank=3 score >= ...
 ```
 
-Equal scores are allowed, but ranks must still be unique and complete. The model must resolve a tie deterministically.
+Equal scores are allowed, but ranks must still be unique and complete.
+The model must resolve a tie deterministically.
 
-Scores are meaningful only inside one model run. Do not compare raw scores between different models:
+Scores of different methods are not directly comparable.
+Method quality is compared by ranking metrics.
 
-```text
-frequency baseline score = 125
-neural model score       = 0.91
-
-125 > 0.91 does not mean that the baseline is better.
-```
-
-Compare models using ranks and evaluation metrics, not their raw scores.
-
-The first train-frequency baseline uses this deterministic tie-break rule:
-
-```text
-1. Smaller wordform_id ranks higher.
-2. If wordform_id is equal, lexicographically smaller gramset ranks higher.
-```
-
-Other models may use their own internal scoring methods, but their final CSV must still provide a complete, unambiguous ranking.
+Other models may use their own internal scoring methods, but their final CSV
+must still provide a complete, unambiguous ranking.
 
 ## Validation
 
@@ -177,7 +160,9 @@ It does not answer:
 "Is this model accurate?"
 ```
 
-Accuracy, MRR, Top-k measures, and model comparison are calculated separately.
+The `evaluate-predictions` command validates the file and computes
+`Top-1 accuracy`, `MRR`, and `Top-3 accuracy`.
+[Evaluation procedure](../../docs/evaluation.md).
 
 ## Milestone files
 
