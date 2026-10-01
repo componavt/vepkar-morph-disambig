@@ -5,9 +5,10 @@ candidate identity ``(wordform_id, gramset)`` among complete prediction rows.
 It is model-independent (no score is inspected), deterministic, and never
 touches the corpus, Git, the filesystem, or split selection.  It rejects any
 prediction candidate outside the strict candidate set of its evaluation
-instance and any evaluation word whose strict candidate set is not fully
-predicted.  Rank permutations and score/rank consistency remain the
-responsibility of the prediction CSV validator.
+instance, any evaluation word whose strict candidate set is not fully
+predicted, any prediction row whose rank is not a positive integer, and any
+evaluation word whose prediction ranks do not form a complete permutation of
+``1..N``.
 """
 
 from __future__ import annotations
@@ -64,7 +65,9 @@ def compute_ranking_metrics(
     Each evaluated word contributes exactly one rank: that of its gold
     candidate.  Words are weighted equally regardless of candidate count.
     Inputs are materialized once; lookup structures are built in a single
-    pass so generator inputs are not exhausted prematurely.
+    pass so generator inputs are not exhausted prematurely.  Every prediction
+    row is validated: its rank must be a positive integer, and the ranks of
+    each evaluated word must form a complete permutation of ``1..N``.
     """
     instance_list = tuple(instances)
     if not instance_list:
@@ -86,6 +89,9 @@ def compute_ranking_metrics(
     }
     predicted_candidates_by_word: dict[int, set[tuple[int, str]]] = {}
     rank_by_identity: dict[tuple[int, int, str], int] = {}
+    ranks_by_word: dict[int, list[int]] = {
+        instance.word_id: [] for instance in instance_list
+    }
     for prediction in predictions:
         if prediction.word_id not in evaluated_ids:
             raise MetricsInputError(
@@ -107,7 +113,14 @@ def compute_ranking_metrics(
             raise MetricsInputError(
                 f"duplicate prediction candidate {identity!r}"
             )
-        rank_by_identity[identity] = prediction.rank
+        rank = prediction.rank
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
+            raise MetricsInputError(
+                f"prediction candidate {identity!r} has nonpositive or "
+                f"non-integer rank {rank!r}"
+            )
+        rank_by_identity[identity] = rank
+        ranks_by_word[prediction.word_id].append(rank)
         predicted_candidates_by_word.setdefault(
             prediction.word_id, set()
         ).add(candidate_key)
@@ -121,6 +134,21 @@ def compute_ranking_metrics(
                 f"missing strict candidate(s): {sorted(missing)!r}"
             )
 
+    for instance in instance_list:
+        word_id = instance.word_id
+        ranks = ranks_by_word[word_id]
+        candidate_count = len(instance.candidates)
+        expected_ranks = set(range(1, candidate_count + 1))
+
+        if (
+            set(ranks) != expected_ranks
+            or len(ranks) != len(set(ranks))
+        ):
+            raise MetricsInputError(
+                f"prediction ranks for word_id={word_id} are not "
+                f"a complete permutation of 1..{candidate_count}"
+            )
+
     gold_ranks: list[int] = []
     for instance in instance_list:
         gold = instance.gold_analysis
@@ -130,11 +158,6 @@ def compute_ranking_metrics(
             raise MetricsInputError(
                 f"gold candidate {(gold.wordform_id, gold.gramset)!r} of "
                 f"word_id={instance.word_id} is missing from predictions"
-            )
-        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 1:
-            raise MetricsInputError(
-                f"gold candidate {identity!r} has nonpositive or "
-                f"non-integer rank {rank!r}"
             )
         gold_ranks.append(rank)
 

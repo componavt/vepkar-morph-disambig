@@ -385,3 +385,80 @@ def test_nonpositive_or_non_integer_gold_rank():
     rows = [bad, FrequencyPrediction(601, 101, "B", 2, 1)]
     with pytest.raises(MetricsInputError, match="nonpositive or non-integer"):
         compute_ranking_metrics([instance], rows)
+
+
+@pytest.mark.parametrize("bad_rank", [0, -1, 1.5, True, False, "1", None])
+def test_invalid_non_gold_rank(bad_rank):
+    instance, _ = _ranked(
+        601,
+        [Candidate(100, "A"), Candidate(101, "B"), Candidate(102, "C")],
+        gold=Candidate(100, "A"),
+    )
+    rows = [
+        FrequencyPrediction(601, 100, "A", 1, 0),
+        FrequencyPrediction(601, 101, "B", bad_rank, 0),
+        FrequencyPrediction(601, 102, "C", 3, 0),
+    ]
+    with pytest.raises(MetricsInputError, match="nonpositive or non-integer"):
+        compute_ranking_metrics([instance], rows)
+
+
+def test_duplicate_ranks_rejected():
+    instance, _ = _ranked(
+        601,
+        [Candidate(100, "A"), Candidate(101, "B"), Candidate(102, "C")],
+        gold=Candidate(100, "A"),
+    )
+    rows = [
+        FrequencyPrediction(601, 100, "A", 1, 0),
+        FrequencyPrediction(601, 101, "B", 2, 0),
+        FrequencyPrediction(601, 102, "C", 2, 0),
+    ]
+    with pytest.raises(MetricsInputError, match="complete permutation"):
+        compute_ranking_metrics([instance], rows)
+
+
+def test_out_of_range_rank_rejected():
+    instance, _ = _ranked(
+        601,
+        [Candidate(100, "A"), Candidate(101, "B"), Candidate(102, "C")],
+        gold=Candidate(100, "A"),
+    )
+    rows = [
+        FrequencyPrediction(601, 100, "A", 1, 0),
+        FrequencyPrediction(601, 101, "B", 2, 0),
+        FrequencyPrediction(601, 102, "C", 4, 0),
+    ]
+    with pytest.raises(MetricsInputError, match="complete permutation") as excinfo:
+        compute_ranking_metrics([instance], rows)
+    assert "word_id=601" in str(excinfo.value)
+
+
+def test_missing_first_rank_rejected():
+    instance, _ = _ranked(
+        601,
+        [Candidate(100, "A"), Candidate(101, "B"), Candidate(102, "C")],
+        gold=Candidate(100, "A"),
+    )
+    rows = [
+        FrequencyPrediction(601, 100, "A", 2, 0),
+        FrequencyPrediction(601, 101, "B", 3, 0),
+        FrequencyPrediction(601, 102, "C", 4, 0),
+    ]
+    with pytest.raises(MetricsInputError, match="complete permutation"):
+        compute_ranking_metrics([instance], rows)
+
+
+def test_valid_permutation_shuffled_row_order():
+    instance, rows = _ranked(
+        601,
+        [Candidate(100, "A"), Candidate(101, "B"), Candidate(102, "C")],
+        gold=Candidate(102, "C"),
+    )
+    ordered = compute_ranking_metrics([instance], rows)
+    shuffled = compute_ranking_metrics(
+        [instance], [rows[2], rows[0], rows[1]]
+    )
+    assert ordered == shuffled
+    assert shuffled.top1_correct == 0
+    assert shuffled.mrr == pytest.approx(1 / 3)
