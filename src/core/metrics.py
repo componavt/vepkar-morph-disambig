@@ -3,9 +3,11 @@
 The metrics core ranks each evaluated word by the position of its exact gold
 candidate identity ``(wordform_id, gramset)`` among complete prediction rows.
 It is model-independent (no score is inspected), deterministic, and never
-touches the corpus, Git, the filesystem, or split selection.  Full candidate
-completeness, rank permutations, and score/rank consistency are prerequisites
-enforced by the prediction CSV validator before the CLI calls this function.
+touches the corpus, Git, the filesystem, or split selection.  It rejects any
+prediction candidate outside the strict candidate set of its evaluation
+instance and any evaluation word whose strict candidate set is not fully
+predicted.  Rank permutations and score/rank consistency remain the
+responsibility of the prediction CSV validator.
 """
 
 from __future__ import annotations
@@ -75,12 +77,26 @@ def compute_ranking_metrics(
         )
 
     evaluated_ids = set(word_ids)
+    strict_candidates_by_word: dict[int, set[tuple[int, str]]] = {
+        instance.word_id: {
+            (candidate.wordform_id, candidate.gramset)
+            for candidate in instance.candidates
+        }
+        for instance in instance_list
+    }
+    predicted_candidates_by_word: dict[int, set[tuple[int, str]]] = {}
     rank_by_identity: dict[tuple[int, int, str], int] = {}
     for prediction in predictions:
         if prediction.word_id not in evaluated_ids:
             raise MetricsInputError(
                 f"prediction word_id={prediction.word_id} is not in the "
                 "supplied evaluation set"
+            )
+        candidate_key = (prediction.wordform_id, prediction.gramset)
+        if candidate_key not in strict_candidates_by_word[prediction.word_id]:
+            raise MetricsInputError(
+                f"prediction candidate {candidate_key!r} of "
+                f"word_id={prediction.word_id} is not in the strict benchmark"
             )
         identity = (
             prediction.word_id,
@@ -92,6 +108,18 @@ def compute_ranking_metrics(
                 f"duplicate prediction candidate {identity!r}"
             )
         rank_by_identity[identity] = prediction.rank
+        predicted_candidates_by_word.setdefault(
+            prediction.word_id, set()
+        ).add(candidate_key)
+
+    for word_id, strict_candidates in strict_candidates_by_word.items():
+        predicted_candidates = predicted_candidates_by_word.get(word_id, set())
+        missing = strict_candidates - predicted_candidates
+        if missing:
+            raise MetricsInputError(
+                f"predictions for word_id={word_id} are incomplete; "
+                f"missing strict candidate(s): {sorted(missing)!r}"
+            )
 
     gold_ranks: list[int] = []
     for instance in instance_list:
