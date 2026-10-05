@@ -161,43 +161,10 @@ rank=1 score >= rank=2 score >= rank=3 score >= ...
 `Top-1 accuracy`, `MRR` и `Top-3 accuracy`.
 [Порядок оценки](../../docs/evaluation.ru.md).
 
-## Milestone-файлы
+## Сохранение результатов
 
-Milestone — это файл предсказаний, который вручную выбран как значимый и воспроизводимый результат. Создание и валидация файла сами по себе не делают его milestone.
+Проверенный файл предсказаний может быть вручную принят
+как значимый результат. Его содержимое должно соответствовать
+описанному выше формату.
 
-Принятый шаблон `run_id`:
-
-```text
-YYYY-MM-DD__author__task__method
-```
-
-Допустимые значения `task`:
-
-```text
-core
-t1-features
-t2-context
-t3-transfer
-```
-
-Имя сохранённого milestone-файла:
-
-```text
-<run_id>__predictions.csv
-```
-
-Пример:
-
-```text
-2026-09-29__andrew__core__train-frequency__predictions.csv
-```
-
-Milestone-файлы обычно представляют итоговую часть (`test`). Перед сохранением milestone его нужно явно проверить:
-
-```bash
-python src/cli.py validate-predictions \
-  --predictions results/milestones/2026-09-29__andrew__core__train-frequency__predictions.csv \
-  --split test
-```
-
-Для сопоставления работ разных авторов и моделей используйте один общий split и этот формат.
+[Правила хранения и оформления результатов](README.ru.md).
