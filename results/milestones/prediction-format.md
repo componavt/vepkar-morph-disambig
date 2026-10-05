@@ -2,9 +2,12 @@
 
 # Prediction format
 
-This document defines the prediction-file contract for models evaluated in the `vepkar-morph-disambig` benchmark.
+This document defines the prediction-file contract for models evaluated
+in the `vepkar-morph-disambig` benchmark.
 
-A prediction file ranks the already existing candidate morphological analyses of corpus word occurrences. It does not add candidates, alter source annotations, or contain gold labels.
+A prediction file ranks existing candidate morphological analyses of corpus
+word occurrences. It does not add candidates, alter source annotations,
+or contain gold labels.
 
 ## Scope
 
@@ -20,21 +23,23 @@ rank the candidates
 select wordform_id + gramset
 ```
 
-A candidate is identified by:
+A candidate is identified by the triple:
 
 ```text
 (word_id, wordform_id, gramset)
 ```
 
-The source-data field `relevance` is not included in prediction files. It is used only during benchmark construction to identify the expert-selected gold candidate (`relevance = 2`).
+The source field `relevance` is not included in prediction files.
+It is used only when constructing the benchmark to identify the
+expert-selected gold candidate (`relevance = 2`).
 
 ## One file, one split
 
 One prediction file contains a complete ranking for one evaluation split:
 `dev` or `test`. Splits must not be mixed in one file.
 
-The split value is not repeated in every CSV row. It is passed to the
-validator as an argument:
+The split is not repeated in each CSV row. It is passed to the validator
+as an argument:
 
 ```bash
 python src/cli.py validate-predictions \
@@ -42,13 +47,15 @@ python src/cli.py validate-predictions \
   --split test
 ```
 
-The validator obtains the evaluated word occurrences from the shared `splits_<tag>.csv` file and the strict benchmark instances.
+The validator obtains the evaluated word occurrences from the shared
+`splits_<tag>.csv` file and the strict benchmark instances.
 
-Temporary model outputs may be stored anywhere. A selected official result is stored in `results/milestones/`.
+Temporary model outputs may be stored anywhere. A selected official result
+is stored in `results/milestones/`.
 
 ## CSV schema
 
-A prediction file must have exactly these five columns in this order:
+A prediction file must contain exactly five columns in this order:
 
 ```csv
 word_id,wordform_id,gramset,rank,score
@@ -59,8 +66,8 @@ word_id,wordform_id,gramset,rank,score
 | `word_id` | Positive integer | Identifier of the evaluated corpus word occurrence |
 | `wordform_id` | Positive integer | Identifier of the candidate dictionary wordform |
 | `gramset` | Nonempty string | Candidate grammatical feature set |
-| `rank` | Positive integer | Candidate position; `1` is the best-ranked candidate |
-| `score` | Finite number | Model-specific candidate score; a higher score is better |
+| `rank` | Positive integer | Candidate position; `1` is the best candidate |
+| `score` | Finite number | Model-specific candidate score; higher is better |
 
 Example:
 
@@ -73,11 +80,13 @@ word_id,wordform_id,gramset,rank,score
 502,7712,SG+GEN,2,8
 ```
 
-This is one file containing predictions for multiple word occurrences. It is not one file per `word_id`.
+This is one file containing predictions for many word occurrences,
+not a separate file for each `word_id`.
 
 ## Completeness rules
 
-For every evaluated `word_id`, the prediction file must include every candidate in the strict benchmark exactly once.
+For each evaluated `word_id`, the prediction file must contain every
+strict benchmark candidate exactly once.
 
 ```text
 Strict benchmark, word_id=501:
@@ -94,12 +103,13 @@ The following are invalid:
 ```text
 - Only the top-ranked candidate is present.
 - A benchmark candidate is missing.
-- An extra candidate not present in the benchmark is added.
-- The same (word_id, wordform_id, gramset) occurs more than once.
+- A candidate not present in the benchmark is added.
+- The same triple (word_id, wordform_id, gramset) occurs more than once.
 - A word occurrence outside the declared split is included.
 ```
 
-A file must not contain `relevance`, a gold label, or a new candidate invented by the model.
+The file must not contain `relevance`, a gold label, or a new candidate
+invented by the model.
 
 ## Rank and score
 
@@ -109,43 +119,43 @@ For a word occurrence with `N` candidates, ranks must be exactly:
 1, 2, 3, ..., N
 ```
 
-Invalid ranks include:
+Invalid ranks:
 
 ```text
 1, 1, 3    duplicate rank
-1, 3, 4    missing rank 2
-0, 1, 2    rank does not start at 1
+1, 3, 4    missing rank=2
+0, 1, 2    ranks do not start at 1
 ```
 
-Scores must be finite numbers and must agree with ranks:
+`score` must be finite and consistent with rank:
 
 ```text
 rank=1 score >= rank=2 score >= rank=3 score >= ...
 ```
 
 Equal scores are allowed, but ranks must still be unique and complete.
-The model must resolve a tie deterministically.
+The model must resolve ties deterministically.
 
 Scores of different methods are not directly comparable.
-Method quality is compared by ranking metrics.
+Method quality is compared using ranking metrics.
 
-Other models may use their own internal scoring methods, but their final CSV
-must still provide a complete, unambiguous ranking.
+Other models may use their own internal scores, but their final CSV must
+still define a complete, unambiguous ranking.
 
 ## Validation
 
-`validate-predictions` checks that a file is compatible with the selected benchmark split. It validates:
+`validate-predictions` checks compatibility with the selected benchmark split:
 
 ```text
 - Exact header and column order.
 - Required types and nonempty gramset values.
 - Finite numeric scores.
 - Candidate membership in the strict benchmark.
-- Completeness of each word's candidate set.
-- Absence of duplicate candidate tuples.
+- Complete candidate sets for every word_id.
+- No duplicate candidate tuples.
 - Membership of every word_id in the declared split.
 - Exact ranks 1..N for every word_id.
-- Nonincreasing scores as rank worsens.
+- Scores do not increase as rank increases.
 ```
 
 Validation answers:
@@ -164,43 +174,9 @@ The `evaluate-predictions` command validates the file and computes
 `Top-1 accuracy`, `MRR`, and `Top-3 accuracy`.
 [Evaluation procedure](../../docs/evaluation.md).
 
-## Milestone files
+## Saving results
 
-A milestone is a prediction file selected manually as a meaningful, reproducible result. Creation and validation do not automatically make a file a milestone.
+A validated prediction file may be manually accepted as a significant result.
+Its contents must conform to the format described above.
 
-The accepted `run_id` pattern is:
-
-```text
-YYYY-MM-DD__author__task__method
-```
-
-Allowed task values are:
-
-```text
-core
-t1-features
-t2-context
-t3-transfer
-```
-
-A saved milestone filename is:
-
-```text
-<run_id>__predictions.csv
-```
-
-Example:
-
-```text
-2026-09-29__andrew__core__train-frequency__predictions.csv
-```
-
-Milestone prediction files normally represent the final evaluation split (`test`). Before saving a milestone, validate it explicitly:
-
-```bash
-python src/cli.py validate-predictions \
-  --predictions results/milestones/2026-09-29__andrew__core__train-frequency__predictions.csv \
-  --split test
-```
-
-Use the same shared split and this format when comparing the work of different authors and models.
+[Result storage and documentation rules](README.md).
