@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tomllib
 from collections import Counter
+from dataclasses import astuple
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,13 +19,15 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from test_splits import GIT_AVAILABLE, _tagged_checkout  # noqa: E402
 from core.data import SUPPORTED_LANGUAGES, read_corpus_tables  # noqa: E402
+from core.diagnostics import build_frequency_diagnostics  # noqa: E402
 from core.frequency import (  # noqa: E402
     FrequencyPrediction,
     build_train_frequency,
     rank_by_train_frequency,
 )
-from core.instances import build_language_instances  # noqa: E402
+from core.instances import Candidate, Instance, build_language_instances  # noqa: E402
 from core.predictions import validate_predictions  # noqa: E402
+from frequency_diagnostics_io import load_verified_frequency_predictions  # noqa: E402
 
 SOURCE_DIRS = ("core", "t1_features", "t2_context", "t3_transfer")
 
@@ -1576,3 +1579,402 @@ def test_evaluate_predictions_missing_candidate_still_fails_validation(tmp_path)
     assert "missing candidate" in result.stdout
     assert "Prediction evaluation: OK" not in result.stdout
     assert "Traceback" not in result.stderr
+
+
+DIAGNOSTICS_HEADER = [
+    "language",
+    "word_id",
+    "word",
+    "candidate_count",
+    "gold_wordform_id",
+    "gold_gramset",
+    "top1_wordform_id",
+    "top1_gramset",
+    "gold_rank",
+    "gold_train_frequency",
+    "top1_train_frequency",
+]
+
+
+def _write_frequency_baseline_predictions(path: Path, rows) -> None:
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["word_id", "wordform_id", "gramset", "rank", "score"])
+        writer.writerows(rows)
+
+
+def _baseline_csv_rows(instances, split_rows, split="dev") -> list[list]:
+    expected = rank_by_train_frequency(instances, split_rows, split)
+    return [
+        [row.word_id, row.wordform_id, row.gramset, row.rank, row.score]
+        for row in expected
+    ]
+
+
+def _run_diagnose(tmp_path: Path, build_rows=None):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    split_rows = _read_split_rows(split_file)
+    dev_instances = _split_instances(instances, split_rows, "dev")
+    baseline_rows = _baseline_csv_rows(instances, split_rows, "dev")
+    rows = (
+        baseline_rows
+        if build_rows is None
+        else build_rows(baseline_rows, dev_instances)
+    )
+    predictions = tmp_path / "predictions-dev.csv"
+    _write_frequency_baseline_predictions(predictions, rows)
+    output = tmp_path / "diagnostics-dev.csv"
+    result = run_cli(
+        "diagnose-frequency-baseline",
+        "--predictions", str(predictions),
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    return result, output, instances, split_rows, dev_instances, baseline_rows
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_frequency_baseline_dev_ok(tmp_path):
+    result, output, instances, split_rows, dev_instances, baseline_rows = (
+        _run_diagnose(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Frequency diagnostics: OK" in result.stdout
+    assert "Split: dev" in result.stdout
+    assert f"Diagnostic rows: {len(dev_instances)}" in result.stdout
+    assert f"Output: {output}" in result.stdout
+    assert "Traceback" not in result.stderr
+
+    header, raw_rows = _read_generated(output)
+    assert header == DIAGNOSTICS_HEADER
+    assert len(raw_rows) == len(dev_instances)
+    keys = [(row[0], int(row[1])) for row in raw_rows]
+    assert keys == sorted(keys)
+    assert {int(row[1]) for row in raw_rows} == {
+        inst.word_id for inst in dev_instances
+    }
+
+    expected = rank_by_train_frequency(instances, split_rows, "dev")
+    verified = load_verified_frequency_predictions(output.parent / "predictions-dev.csv", expected)
+    expected_rows = build_frequency_diagnostics(dev_instances, verified)
+    assert raw_rows == [list(map(str, astuple(row))) for row in expected_rows]
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_reordered_predictions_accepted(tmp_path):
+    result, output, _, _, dev_instances, _ = _run_diagnose(
+        tmp_path, lambda baseline, dev: list(reversed(baseline))
+    )
+    assert result.returncode == 0, result.stderr
+    assert f"Diagnostic rows: {len(dev_instances)}" in result.stdout
+    assert output.is_file()
+    assert "Traceback" not in result.stderr
+
+
+def _non_baseline_valid_rows(dev_instances):
+    rows = _valid_prediction_rows(dev_instances)
+    first = sorted(
+        dev_instances, key=lambda inst: (inst.language, inst.word_id)
+    )[0]
+    first_rows = [row for row in rows if row[0] == first.word_id]
+    first_rows[0], first_rows[1] = first_rows[1], first_rows[0]
+    return rows
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_structurally_valid_non_baseline_rejected(tmp_path):
+    result, output, _, _, dev_instances, baseline_rows = _run_diagnose(
+        tmp_path, lambda baseline, dev: _non_baseline_valid_rows(dev)
+    )
+    assert [tuple(row) for row in _non_baseline_valid_rows(dev_instances)] != [
+        tuple(row) for row in baseline_rows
+    ]
+    assert result.returncode == 1
+    assert "do not match the expected frequency baseline" in result.stderr
+    assert not output.exists()
+    assert "Frequency diagnostics: OK" not in result.stdout
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_invalid_predictions_validation_failure(tmp_path):
+    result, output, _, _, _, _ = _run_diagnose(
+        tmp_path, lambda baseline, dev: baseline[:-1]
+    )
+    assert result.returncode == 1
+    assert "Predictions validation: FAILED" in result.stdout
+    assert "Split: dev" in result.stdout
+    assert not output.exists()
+    assert "Frequency diagnostics: OK" not in result.stdout
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert "Traceback" not in result.stderr
+
+
+def test_diagnose_help_states_uncompressed_and_dev_only(tmp_path):
+    result = run_cli("diagnose-frequency-baseline", "--help")
+    assert result.returncode == 0
+    assert "uncompressed" in result.stdout
+    assert "--predictions" in result.stdout
+    assert "--output" in result.stdout
+    assert "--data-dir" in result.stdout
+    assert "--split-file" in result.stdout
+    assert "--split {dev,test}" not in result.stdout
+    assert "diagnose-frequency-baseline" in result.stdout
+
+
+def test_diagnose_missing_checkout_checked_first(tmp_path):
+    missing = tmp_path / "missing-dictorpus-data"
+    output = tmp_path / "out.csv"
+    result = run_cli(
+        "diagnose-frequency-baseline",
+        "--predictions", str(tmp_path / "missing-predictions.csv"),
+        "--output", str(output),
+        "--data-dir", str(missing),
+    )
+    assert result.returncode == 1
+    assert "dictorpus-data" in result.stderr
+    assert str(missing) in result.stderr
+    assert "cannot read predictions file" not in result.stderr
+    assert not output.exists()
+    assert "Frequency diagnostics" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_rejects_zst_input(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    zst = tmp_path / "predictions.csv.zst"
+    zst.write_text("word_id,wordform_id,gramset,rank,score\n", encoding="utf-8")
+    output = tmp_path / "diagnostics.csv"
+    result = run_cli(
+        "diagnose-frequency-baseline",
+        "--predictions", str(zst),
+        "--output", str(output),
+        "--data-dir", str(checkout),
+    )
+    assert result.returncode == 1
+    assert "uncompressed" in result.stderr
+    assert str(zst) in result.stderr
+    assert not output.exists()
+    assert "Frequency diagnostics: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_rejects_zst_output(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    predictions = tmp_path / "predictions-dev.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
+    output = tmp_path / "diagnostics.csv.zst"
+    result = run_cli(
+        "diagnose-frequency-baseline",
+        "--predictions", str(predictions),
+        "--output", str(output),
+        "--data-dir", str(checkout),
+    )
+    assert result.returncode == 1
+    assert "uncompressed" in result.stderr
+    assert str(output) in result.stderr
+    assert not output.exists()
+    assert "Frequency diagnostics: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_existing_output_protected(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    output = tmp_path / "diagnostics-dev.csv"
+    original = "language,word_id,word\n"
+    output.write_text(original, encoding="utf-8")
+    predictions = tmp_path / "predictions-dev.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
+    result = run_cli(
+        "diagnose-frequency-baseline",
+        "--predictions", str(predictions),
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "already exists" in result.stderr
+    assert str(output) in result.stderr
+    assert output.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert "Frequency diagnostics: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_output_directory_rejected(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    output = tmp_path / "outdir"
+    output.mkdir()
+    (output / "keep.txt").write_text("keep", encoding="utf-8")
+    predictions = tmp_path / "predictions-dev.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
+    result = run_cli(
+        "diagnose-frequency-baseline",
+        "--predictions", str(predictions),
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "output path is a directory" in result.stderr
+    assert f"  {output}" in result.stderr
+    assert output.is_dir()
+    assert (output / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert "Frequency diagnostics: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_broken_symlink_output_protected(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    output = tmp_path / "diagnostics.csv"
+    missing_target = tmp_path / "missing-target.csv"
+    try:
+        output.symlink_to(missing_target)
+    except (OSError, NotImplementedError):
+        pytest.skip("Symlink creation is unavailable in this environment")
+    predictions = tmp_path / "predictions-dev.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
+    result = run_cli(
+        "diagnose-frequency-baseline",
+        "--predictions", str(predictions),
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "already exists" in result.stderr
+    assert output.is_symlink()
+    assert output.readlink() == missing_target
+    assert not missing_target.exists()
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert "Frequency diagnostics: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_missing_parent_rejected_without_creation(tmp_path):
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_parts(split_file, instances)
+    missing_parent = tmp_path / "no-such-dir"
+    output = missing_parent / "out.csv"
+    predictions = tmp_path / "predictions-dev.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n", encoding="utf-8"
+    )
+    result = run_cli(
+        "diagnose-frequency-baseline",
+        "--predictions", str(predictions),
+        "--output", str(output),
+        "--data-dir", str(checkout),
+        "--split-file", str(split_file),
+    )
+    assert result.returncode == 1
+    assert "output directory does not exist" in result.stderr
+    assert str(missing_parent) in result.stderr
+    assert not missing_parent.exists()
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert "Frequency diagnostics: OK" not in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+def test_diagnose_preserves_unicode_commas_quotes(tmp_path, monkeypatch, capsys):
+    import cli as cli_pkg
+
+    checkout = _tagged_checkout(tmp_path)
+    instances = (
+        Instance(
+            language="krl",
+            word_id=1,
+            sentence_id=1,
+            text_id=1,
+            word='Šuuruš’a, "päiv"',
+            word_number=1,
+            sentence_xml="<s/>",
+            candidates=(Candidate(10, "N+SG,NOM"), Candidate(11, "N+SG+GEN")),
+            gold_analysis=Candidate(10, "N+SG,NOM"),
+        ),
+        Instance(
+            language="vep",
+            word_id=2,
+            sentence_id=1,
+            text_id=2,
+            word="kala, 'kal'",
+            word_number=1,
+            sentence_xml="<s/>",
+            candidates=(Candidate(20, "A"), Candidate(21, "B")),
+            gold_analysis=Candidate(20, "A"),
+        ),
+    )
+    split_rows = (("krl", 1, "dev"), ("vep", 2, "dev"))
+    baseline = rank_by_train_frequency(instances, split_rows, "dev")
+    predictions = tmp_path / "predictions-uni.csv"
+    _write_frequency_baseline_predictions(
+        predictions,
+        [
+            [row.word_id, row.wordform_id, row.gramset, row.rank, row.score]
+            for row in baseline
+        ],
+    )
+    output = tmp_path / "diagnostics-uni.csv"
+
+    def stub_context(data_dir, tag, split_file=None):
+        return cli_pkg.BenchmarkContext(
+            tag=tag,
+            split_path=split_file or predictions,
+            instances=instances,
+            split_rows=split_rows,
+        )
+
+    monkeypatch.setattr(cli_pkg, "load_benchmark_context", stub_context)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=checkout,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert "Frequency diagnostics: OK" in captured.out
+    assert "Diagnostic rows: 2" in captured.out
+    header, raw = _read_generated(output)
+    assert header == DIAGNOSTICS_HEADER
+    assert len(raw) == 2
+    by_word = {int(row[1]): row for row in raw}
+    assert by_word[1][2] == 'Šuuruš’a, "päiv"'
+    assert by_word[1][5] == "N+SG,NOM"
+    assert by_word[1][7] == "N+SG,NOM"
+    assert by_word[2][2] == "kala, 'kal'"
+    assert "Traceback" not in captured.err

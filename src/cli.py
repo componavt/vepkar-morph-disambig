@@ -19,6 +19,7 @@ from core.data import (
     require_local_corpus,
     resolve_data_dir,
 )
+from core.diagnostics import DiagnosticMappingError, build_frequency_diagnostics
 from core.fetch import FetchError, fetch_data
 from core.frequency import (
     FrequencyPrediction,
@@ -64,6 +65,11 @@ from core.splits import (
     write_split_csv,
 )
 from core.validation import CorpusError, inspect_corpus
+from frequency_diagnostics_io import (
+    FrequencyBaselineMismatchError,
+    load_verified_frequency_predictions,
+    write_frequency_diagnostics,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PYPROJECT = _PROJECT_ROOT / "pyproject.toml"
@@ -207,6 +213,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
     )
     evaluate.add_argument(
+        "--split-file",
+        type=Path,
+        default=None,
+        help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
+    )
+    diagnose = commands.add_parser(
+        "diagnose-frequency-baseline",
+        help=(
+            "Diagnose a frequency-baseline dev predictions CSV "
+            "(uncompressed CSV input and output)"
+        ),
+    )
+    diagnose.add_argument(
+        "--predictions",
+        type=Path,
+        required=True,
+        help="Path to the uncompressed dev predictions CSV",
+    )
+    diagnose.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path for the uncompressed diagnostics CSV output",
+    )
+    diagnose.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    diagnose.add_argument(
         "--split-file",
         type=Path,
         default=None,
@@ -921,6 +958,135 @@ def _run_frequency_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_diagnose_frequency_baseline(args: argparse.Namespace) -> int:
+    try:
+        data_dir, tag = _preflight_benchmark(args.data_dir)
+    except (CorpusTagError, DataError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for role, path in (("predictions", args.predictions), ("output", args.output)):
+        if path.suffix.lower() == ".zst":
+            print(
+                f"error: {role} path must be an uncompressed CSV, not .zst "
+                "(decompress it beforehand):",
+                file=sys.stderr,
+            )
+            print(f"  {path}", file=sys.stderr)
+            return 1
+    output_path = Path(args.output)
+    if output_path.is_dir():
+        print("error: output path is a directory:", file=sys.stderr)
+        print(f"  {output_path}", file=sys.stderr)
+        return 1
+    if output_path.exists() or output_path.is_symlink():
+        print("error: output file already exists:", file=sys.stderr)
+        print(f"  {output_path}", file=sys.stderr)
+        return 1
+    if not output_path.parent.is_dir():
+        print("error: output directory does not exist:", file=sys.stderr)
+        print(f"  {output_path.parent}", file=sys.stderr)
+        return 1
+    try:
+        with args.predictions.open("rb"):
+            pass
+    except OSError as exc:
+        print("error: cannot read predictions file:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    try:
+        context = load_benchmark_context(data_dir, tag, args.split_file)
+    except DataError:
+        return 1
+    except SplitError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    try:
+        validation = validate_predictions(
+            predictions_path=args.predictions,
+            split="dev",
+            instances=context.instances,
+            split_rows=context.split_rows,
+        )
+    except PredictionFileReadError as exc:
+        print("error: cannot read predictions file:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        if exc.__cause__ is not None:
+            print(f"  {exc.__cause__}", file=sys.stderr)
+        return 1
+    except PredictionCsvParseError as exc:
+        print("error: cannot parse predictions CSV:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        if exc.__cause__ is not None:
+            print(f"  {exc.__cause__}", file=sys.stderr)
+        return 1
+    except BenchmarkIntegrityError as exc:
+        print("error: strict benchmark is internally inconsistent:", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    except UnicodeDecodeError:
+        print("error: cannot decode predictions file as UTF-8:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        return 1
+    if not validation.is_valid:
+        _print_validation_failure(validation)
+        return 1
+    try:
+        expected = rank_by_train_frequency(
+            context.instances, context.split_rows, "dev"
+        )
+        verified = load_verified_frequency_predictions(args.predictions, expected)
+    except FrequencyBaselineMismatchError as exc:
+        print(
+            "error: predictions do not match the expected frequency baseline:",
+            file=sys.stderr,
+        )
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    except (PredictionFileReadError, PredictionCsvParseError) as exc:
+        print("error: cannot verify predictions against the baseline:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        if exc.__cause__ is not None:
+            print(f"  {exc.__cause__}", file=sys.stderr)
+        return 1
+    except UnicodeDecodeError:
+        print("error: cannot decode predictions file as UTF-8:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        return 1
+    dev_texts = {
+        (language, text_id)
+        for language, text_id, part in context.split_rows
+        if part == "dev"
+    }
+    dev_instances = tuple(
+        inst
+        for inst in context.instances
+        if (inst.language, inst.text_id) in dev_texts
+    )
+    try:
+        rows = build_frequency_diagnostics(dev_instances, verified)
+    except BenchmarkIntegrityError as exc:
+        print("error: strict benchmark is internally inconsistent:", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    except DiagnosticMappingError as exc:
+        print("error: cannot map predictions to dev instances:", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    try:
+        count = write_frequency_diagnostics(args.output, rows)
+    except OSError as exc:
+        print("error: cannot write diagnostics CSV:", file=sys.stderr)
+        print(f"  {args.output}", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    print("Frequency diagnostics: OK")
+    print("Split: dev")
+    print(f"Diagnostic rows: {count}")
+    print(f"Output: {args.output}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -974,6 +1140,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_validate_predictions(args)
     if args.command == "frequency-baseline":
         return _run_frequency_baseline(args)
+    if args.command == "diagnose-frequency-baseline":
+        return _run_diagnose_frequency_baseline(args)
     if args.command == "evaluate-predictions":
         return run_evaluate_predictions(args)
     parser.print_help()

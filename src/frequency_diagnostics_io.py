@@ -1,27 +1,33 @@
-"""Read and verify one frequency-baseline predictions CSV against an expected baseline.
+"""Read, verify, and write frequency-baseline diagnostic CSVs.
 
 The caller has already validated the file with :func:`core.predictions.
 validate_predictions` for the dev split and has the complete baseline produced
 by :func:`core.frequency.rank_by_train_frequency` for the same data and split.
-This module only verifies that the file is identical to that baseline, using
-exact decimal arithmetic so that no score is ever rounded or compared through
-float.  It never touches the corpus, Git, or the filesystem beyond reading the
-one CSV file.
+This module verifies that the file is identical to that baseline, using exact
+decimal arithmetic so that no score is ever rounded or compared through float,
+and writes diagnostic rows safely without overwriting an existing file.  It
+never touches the corpus or Git.
 """
 
 from __future__ import annotations
 
 import csv
 import decimal
+import os
+import tempfile
+from dataclasses import astuple, fields
 from pathlib import Path
 from typing import Iterable
 
+from core.diagnostics import FrequencyDiagnostic
 from core.frequency import FrequencyPrediction
 from core.predictions import (
     PREDICTION_HEADER,
     PredictionCsvParseError,
     PredictionFileReadError,
 )
+
+_DIAGNOSTICS_HEADER = tuple(field.name for field in fields(FrequencyDiagnostic))
 
 _Identity = tuple[int, int, str]
 
@@ -140,3 +146,45 @@ def load_verified_frequency_predictions(
             f"{expected_row.rank}, score {expected_row.score}"
         )
     return tuple(rows)
+
+
+def write_frequency_diagnostics(
+    path: Path, rows: Iterable[FrequencyDiagnostic]
+) -> int:
+    """Write diagnostic rows unchanged to ``path`` and return the row count.
+
+    The destination must not already exist (files, directories, and symlinks
+    including broken ones are all rejected) and its parent directory must
+    already exist; nothing is created besides the CSV itself.  The rows are
+    written to a sibling temporary file that is then hard-linked into place, so
+    an existing destination is never overwritten or replaced.
+    """
+    if path.is_symlink() or path.exists():
+        raise FileExistsError(f"output path already exists: {path}")
+    if path.is_dir():
+        raise IsADirectoryError(f"output path is a directory: {path}")
+    parent = path.parent
+    if not parent.is_dir():
+        raise FileNotFoundError(f"output directory does not exist: {parent}")
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=".vepkar-diagnostics-", suffix=".tmp", dir=str(parent)
+    )
+    os.close(descriptor)
+    temp_path = Path(temp_name)
+    try:
+        with temp_path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(_DIAGNOSTICS_HEADER)
+            count = 0
+            for row in rows:
+                writer.writerow(astuple(row))
+                count += 1
+        os.link(temp_path, path)
+        os.unlink(temp_path)
+        return count
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
