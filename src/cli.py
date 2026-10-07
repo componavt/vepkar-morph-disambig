@@ -71,6 +71,7 @@ from frequency_diagnostics_io import (
     load_verified_frequency_predictions,
     write_frequency_diagnostics,
 )
+from frequency_diagnostics_summary import format_frequency_diagnostics_summary
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PYPROJECT = _PROJECT_ROOT / "pyproject.toml"
@@ -1073,6 +1074,7 @@ def _run_diagnose_frequency_baseline(args: argparse.Namespace) -> int:
         print("error: cannot map predictions to dev instances:", file=sys.stderr)
         print(f"  {exc}", file=sys.stderr)
         return 1
+    summary_lines = format_frequency_diagnostics_summary(rows)
     try:
         count = write_frequency_diagnostics(args.output, rows)
     except DiagnosticCleanupError as exc:
@@ -1094,6 +1096,8 @@ def _run_diagnose_frequency_baseline(args: argparse.Namespace) -> int:
     print("Split: dev")
     print(f"Diagnostic rows: {count}")
     print(f"Output: {args.output}")
+    for line in summary_lines:
+        print(line)
     return 0
 
 

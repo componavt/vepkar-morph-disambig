@@ -2190,3 +2190,109 @@ def test_diagnose_preserves_unicode_commas_quotes(tmp_path, monkeypatch, capsys)
     assert by_word[1][7] == "N+SG,NOM"
     assert by_word[2][2] == "kala, 'kal'"
     assert "Traceback" not in captured.err
+
+
+def test_diagnose_success_prints_summary_after_success_lines(
+    tmp_path, monkeypatch, capsys
+):
+    import cli as cli_pkg
+
+    _, instances, split_rows, baseline, predictions = _tiny_dev_fixture(tmp_path)
+    output = tmp_path / "diagnostics-dev.csv"
+    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+
+    out_lines = captured.out.splitlines()
+    assert out_lines[:4] == [
+        "Frequency diagnostics: OK",
+        "Split: dev",
+        "Diagnostic rows: 1",
+        f"Output: {output}",
+    ]
+    assert out_lines[4:] == [
+        "Summary",
+        "Occurrences: 1",
+        "Correct Top-1: 1",
+        "Errors: 0",
+        "Top-1 accuracy: 1.0000",
+        "",
+        "Gold rank",
+        "Rank 1: 1",
+        "Rank 2: 0",
+        "Rank 3: 0",
+        "Rank >=4: 0",
+        "",
+        "Frequencies",
+        "Zero-gold-frequency occurrences: 1",
+        "Zero-gold-frequency errors: 0",
+        "Zero-gold errors / all errors (E0/E): N/A",
+        "Error rate within zero-gold group (E0/Z): 0.0000",
+        "Errors with top1 frequency > gold: 0",
+        "Errors with equal positive frequencies: 0",
+        "Errors with both frequencies zero: 0",
+        "",
+        "By language",
+        "language occurrences errors top1_accuracy",
+        "krl 1 0 1.0000",
+        "",
+        "By candidate count",
+        "candidate_count occurrences errors top1_accuracy",
+        "2 1 0 1.0000",
+    ]
+
+    verified = load_verified_frequency_predictions(predictions, baseline)
+    expected_rows = build_frequency_diagnostics(instances, verified)
+    header, raw_rows = _read_generated(output)
+    assert header == DIAGNOSTICS_HEADER
+    assert raw_rows == [list(map(str, astuple(row))) for row in expected_rows]
+    assert "Traceback" not in captured.err
+
+
+@pytest.mark.parametrize("kind", ["oserror", "cleanup"])
+def test_diagnose_write_failure_suppresses_summary(
+    tmp_path, monkeypatch, capsys, kind
+):
+    import cli as cli_pkg
+
+    _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
+    output = tmp_path / "diagnostics-dev.csv"
+
+    def fail_write(path, rows):
+        if kind == "oserror":
+            raise OSError("disk full")
+        raise cli_pkg.DiagnosticCleanupError(
+            output, tmp_path / "diagnostics-temp.tmp"
+        ) from PermissionError("cleanup denied")
+
+    monkeypatch.setattr(cli_pkg, "write_frequency_diagnostics", fail_write)
+    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    if kind == "oserror":
+        assert "cannot write diagnostics CSV" in captured.err
+        assert "disk full" in captured.err
+        assert not output.exists()
+    else:
+        assert "CSV published, but temporary cleanup failed" in captured.err
+        assert "cleanup denied" in captured.err
+    assert "Frequency diagnostics: OK" not in captured.out
+    assert "Summary" not in captured.out
+    assert "Occurrences:" not in captured.out
+    assert "Traceback" not in captured.err
