@@ -80,7 +80,7 @@ def build_frequency_diagnostics(
 
     rows_by_word: dict[int, list[FrequencyPrediction]] = {}
     seen_identities: set[tuple[int, int, str]] = set()
-    for prediction in tuple(predictions):
+    for prediction in predictions:
         if prediction.word_id not in instances_by_id:
             _raise_mapping_error(
                 prediction.word_id, "prediction references an unknown input word_id"
