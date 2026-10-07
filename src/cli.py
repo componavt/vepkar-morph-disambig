@@ -66,6 +66,7 @@ from core.splits import (
 )
 from core.validation import CorpusError, inspect_corpus
 from frequency_diagnostics_io import (
+    DiagnosticCleanupError,
     FrequencyBaselineMismatchError,
     load_verified_frequency_predictions,
     write_frequency_diagnostics,
@@ -1046,8 +1047,7 @@ def _run_diagnose_frequency_baseline(args: argparse.Namespace) -> int:
     except (PredictionFileReadError, PredictionCsvParseError) as exc:
         print("error: cannot verify predictions against the baseline:", file=sys.stderr)
         print(f"  {args.predictions}", file=sys.stderr)
-        if exc.__cause__ is not None:
-            print(f"  {exc.__cause__}", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
         return 1
     except UnicodeDecodeError:
         print("error: cannot decode predictions file as UTF-8:", file=sys.stderr)
@@ -1075,6 +1075,16 @@ def _run_diagnose_frequency_baseline(args: argparse.Namespace) -> int:
         return 1
     try:
         count = write_frequency_diagnostics(args.output, rows)
+    except DiagnosticCleanupError as exc:
+        print(
+            "error: CSV published, but temporary cleanup failed:",
+            file=sys.stderr,
+        )
+        print(f"  output: {exc.output_path}", file=sys.stderr)
+        print(f"  temporary: {exc.temp_path}", file=sys.stderr)
+        if exc.__cause__ is not None:
+            print(f"  {exc.__cause__}", file=sys.stderr)
+        return 1
     except OSError as exc:
         print("error: cannot write diagnostics CSV:", file=sys.stderr)
         print(f"  {args.output}", file=sys.stderr)

@@ -19,6 +19,7 @@ from core.predictions import (  # noqa: E402
     PredictionFileReadError,
 )
 from frequency_diagnostics_io import (  # noqa: E402
+    DiagnosticCleanupError,
     FrequencyBaselineMismatchError,
     load_verified_frequency_predictions,
     write_frequency_diagnostics,
@@ -273,7 +274,7 @@ def _diagnostic_rows():
             top1_gramset="V+IND+PRS",
             gold_rank=1,
             gold_train_frequency=0,
-            top1_train_frequency=3,
+            top1_train_frequency=0,
         ),
     )
 
@@ -356,7 +357,7 @@ def test_write_diagnostics_rejects_directory(tmp_path):
     path = tmp_path / "outdir"
     path.mkdir()
     (path / "keep.txt").write_text("keep", encoding="utf-8")
-    with pytest.raises(OSError):
+    with pytest.raises(IsADirectoryError):
         write_frequency_diagnostics(path, rows)
     assert path.is_dir()
     assert (path / "keep.txt").read_text(encoding="utf-8") == "keep"
@@ -398,4 +399,60 @@ def test_write_diagnostics_cleans_temp_on_failure(tmp_path):
     with pytest.raises(RuntimeError):
         write_frequency_diagnostics(path, exploding_rows())
     assert not path.exists()
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+
+
+def _patch_diagnostics_unlink(monkeypatch, failure):
+    real_unlink = Path.unlink
+
+    def patched_unlink(self, *args, **kwargs):
+        if self.name.startswith(".vepkar-diagnostics-") and self.name.endswith(".tmp"):
+            return failure(self, real_unlink)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", patched_unlink)
+    return real_unlink
+
+
+def test_write_diagnostics_cleanup_failure_raises_dedicated_error(tmp_path, monkeypatch):
+    rows = _diagnostic_rows()
+    path = tmp_path / "diagnostics.csv"
+
+    def fail_removal(self, real_unlink):
+        raise PermissionError("cleanup denied")
+
+    real_unlink = _patch_diagnostics_unlink(monkeypatch, fail_removal)
+    with pytest.raises(DiagnosticCleanupError) as exc_info:
+        write_frequency_diagnostics(path, rows)
+    assert exc_info.value.output_path == path
+    temps = list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert len(temps) == 1
+    assert exc_info.value.temp_path == temps[0]
+    assert isinstance(exc_info.value.__cause__, PermissionError)
+    assert str(exc_info.value.__cause__) == "cleanup denied"
+
+    header, raw = _read_csv(path)
+    assert header == DIAGNOSTICS_HEADER
+    assert raw == [list(map(str, astuple(row))) for row in rows]
+    real_unlink(temps[0])
+
+
+def test_write_diagnostics_cleanup_retry_succeeds(tmp_path, monkeypatch):
+    rows = _diagnostic_rows()
+    path = tmp_path / "diagnostics.csv"
+    attempts = {"count": 0}
+
+    def flaky_removal(self, real_unlink):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("transient failure")
+        return real_unlink(self)
+
+    _patch_diagnostics_unlink(monkeypatch, flaky_removal)
+    count = write_frequency_diagnostics(path, rows)
+    assert count == 2
+    assert attempts["count"] == 2
+    header, raw = _read_csv(path)
+    assert header == DIAGNOSTICS_HEADER
+    assert raw == [list(map(str, astuple(row))) for row in rows]
     assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))

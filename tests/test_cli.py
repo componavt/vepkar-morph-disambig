@@ -1,5 +1,6 @@
 import argparse
 import csv
+import os
 import subprocess
 import sys
 import tomllib
@@ -26,7 +27,10 @@ from core.frequency import (  # noqa: E402
     rank_by_train_frequency,
 )
 from core.instances import Candidate, Instance, build_language_instances  # noqa: E402
-from core.predictions import validate_predictions  # noqa: E402
+from core.predictions import (  # noqa: E402
+    PredictionCsvParseError,
+    validate_predictions,
+)
 from frequency_diagnostics_io import load_verified_frequency_predictions  # noqa: E402
 
 SOURCE_DIRS = ("core", "t1_features", "t2_context", "t3_transfer")
@@ -1675,30 +1679,238 @@ def test_diagnose_reordered_predictions_accepted(tmp_path):
     assert "Traceback" not in result.stderr
 
 
-def _non_baseline_valid_rows(dev_instances):
-    rows = _valid_prediction_rows(dev_instances)
-    first = sorted(
-        dev_instances, key=lambda inst: (inst.language, inst.word_id)
-    )[0]
-    first_rows = [row for row in rows if row[0] == first.word_id]
-    first_rows[0], first_rows[1] = first_rows[1], first_rows[0]
-    return rows
-
-
-@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
-def test_diagnose_structurally_valid_non_baseline_rejected(tmp_path):
-    result, output, _, _, dev_instances, baseline_rows = _run_diagnose(
-        tmp_path, lambda baseline, dev: _non_baseline_valid_rows(dev)
+def _tiny_dev_fixture(tmp_path, name="predictions-dev.csv"):
+    instance = Instance(
+        language="krl",
+        word_id=1,
+        sentence_id=1,
+        text_id=1,
+        word="kala",
+        word_number=1,
+        sentence_xml="<s/>",
+        candidates=(Candidate(10, "N+SG+NOM"), Candidate(11, "N+SG+GEN")),
+        gold_analysis=Candidate(10, "N+SG+NOM"),
     )
-    assert [tuple(row) for row in _non_baseline_valid_rows(dev_instances)] != [
-        tuple(row) for row in baseline_rows
-    ]
-    assert result.returncode == 1
-    assert "do not match the expected frequency baseline" in result.stderr
+    instances = (instance,)
+    split_rows = (("krl", 1, "dev"),)
+    baseline = rank_by_train_frequency(instances, split_rows, "dev")
+    predictions = tmp_path / name
+    _write_frequency_baseline_predictions(
+        predictions,
+        [
+            [row.word_id, row.wordform_id, row.gramset, row.rank, row.score]
+            for row in baseline
+        ],
+    )
+    return instance, instances, split_rows, baseline, predictions
+
+
+def _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows):
+    def stub_context(data_dir, tag, split_file=None):
+        return cli_pkg.BenchmarkContext(
+            tag=tag,
+            split_path=split_file,
+            instances=instances,
+            split_rows=split_rows,
+        )
+
+    monkeypatch.setattr(
+        cli_pkg, "_preflight_benchmark", lambda data_dir: (data_dir, "fixture-tag")
+    )
+    monkeypatch.setattr(cli_pkg, "load_benchmark_context", stub_context)
+
+
+@pytest.mark.parametrize("kind", ["score", "rank"])
+def test_diagnose_baseline_mismatch_explains_kind(tmp_path, monkeypatch, capsys, kind):
+    import cli as cli_pkg
+
+    _, instances, split_rows, baseline, predictions = _tiny_dev_fixture(tmp_path)
+    if kind == "score":
+        rows = [
+            [row.word_id, row.wordform_id, row.gramset, row.rank, row.score + 1]
+            for row in baseline
+        ]
+    else:
+        rows = [
+            [row.word_id, row.wordform_id, row.gramset, row.rank, row.score]
+            for row in baseline
+        ]
+        rows[0][3], rows[1][3] = rows[1][3], rows[0][3]
+    _write_frequency_baseline_predictions(predictions, rows)
+
+    assert validate_predictions(
+        predictions_path=predictions,
+        split="dev",
+        instances=instances,
+        split_rows=split_rows,
+    ).is_valid
+
+    output = tmp_path / "diagnostics-dev.csv"
+    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "do not match the expected frequency baseline" in captured.err
+    assert kind in captured.err
+    assert "expected" in captured.err
+    assert "Predictions validation: FAILED" not in captured.out
     assert not output.exists()
-    assert "Frequency diagnostics: OK" not in result.stdout
+    assert "Frequency diagnostics: OK" not in captured.out
     assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
-    assert "Traceback" not in result.stderr
+    assert "Traceback" not in captured.err
+
+
+def test_diagnose_baseline_read_error_explanation_printed(
+    tmp_path, monkeypatch, capsys
+):
+    import cli as cli_pkg
+
+    _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
+    output = tmp_path / "diagnostics-dev.csv"
+
+    def fail_verification(path, expected):
+        raise PredictionCsvParseError("unexpected header during verification")
+
+    monkeypatch.setattr(
+        cli_pkg, "load_verified_frequency_predictions", fail_verification
+    )
+    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "cannot verify predictions against the baseline" in captured.err
+    assert "unexpected header during verification" in captured.err
+    assert not output.exists()
+    assert "Frequency diagnostics: OK" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def _patch_diagnostics_unlink(monkeypatch, failure):
+    real_unlink = Path.unlink
+
+    def patched_unlink(self, *args, **kwargs):
+        if self.name.startswith(".vepkar-diagnostics-") and self.name.endswith(".tmp"):
+            return failure(self, real_unlink)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", patched_unlink)
+    return real_unlink
+
+
+def test_diagnose_cleanup_failure_reports_published_csv(
+    tmp_path, monkeypatch, capsys
+):
+    import cli as cli_pkg
+
+    _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
+    output = tmp_path / "diagnostics-dev.csv"
+
+    def fail_removal(self, real_unlink):
+        raise PermissionError("cleanup denied")
+
+    real_unlink = _patch_diagnostics_unlink(monkeypatch, fail_removal)
+    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "CSV published, but temporary cleanup failed" in captured.err
+    assert str(output) in captured.err
+    temps = list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert len(temps) == 1
+    assert str(temps[0]) in captured.err
+    assert "cleanup denied" in captured.err
+    assert "Frequency diagnostics: OK" not in captured.out
+    assert "cannot write diagnostics CSV" not in captured.err
+    header, raw = _read_generated(output)
+    assert header == DIAGNOSTICS_HEADER
+    assert len(raw) == 1
+    real_unlink(temps[0])
+
+
+def test_diagnose_cleanup_retry_succeeds(tmp_path, monkeypatch, capsys):
+    import cli as cli_pkg
+
+    _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
+    output = tmp_path / "diagnostics-dev.csv"
+    attempts = {"count": 0}
+
+    def flaky_removal(self, real_unlink):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("transient failure")
+        return real_unlink(self)
+
+    _patch_diagnostics_unlink(monkeypatch, flaky_removal)
+    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert attempts["count"] == 2
+    assert "Frequency diagnostics: OK" in captured.out
+    assert "Diagnostic rows: 1" in captured.out
+    assert f"Output: {output}" in captured.out
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    header, raw = _read_generated(output)
+    assert header == DIAGNOSTICS_HEADER
+    assert len(raw) == 1
+    assert "Traceback" not in captured.err
+
+
+def test_diagnose_link_failure_leaves_no_output(tmp_path, monkeypatch, capsys):
+    import cli as cli_pkg
+
+    _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
+    output = tmp_path / "diagnostics-dev.csv"
+
+    def failing_link(src, dst):
+        raise OSError("link denied")
+
+    monkeypatch.setattr(os, "link", failing_link)
+    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "cannot write diagnostics CSV" in captured.err
+    assert "link denied" in captured.err
+    assert not output.exists()
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert "Frequency diagnostics: OK" not in captured.out
+    assert "Traceback" not in captured.err
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")

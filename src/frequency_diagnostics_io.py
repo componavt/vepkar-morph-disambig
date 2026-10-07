@@ -36,6 +36,13 @@ class FrequencyBaselineMismatchError(ValueError):
     """The predictions CSV differs from the expected frequency baseline."""
 
 
+class DiagnosticCleanupError(OSError):
+    def __init__(self, output_path: Path, temp_path: Path):
+        self.output_path = output_path
+        self.temp_path = temp_path
+        super().__init__("CSV published, but temporary cleanup failed")
+
+
 def load_verified_frequency_predictions(
     path: Path,
     expected: Iterable[FrequencyPrediction],
@@ -157,12 +164,15 @@ def write_frequency_diagnostics(
     including broken ones are all rejected) and its parent directory must
     already exist; nothing is created besides the CSV itself.  The rows are
     written to a sibling temporary file that is then hard-linked into place, so
-    an existing destination is never overwritten or replaced.
+    an existing destination is never overwritten or replaced.  A successful
+    hard link publishes the output; a later failure to remove the temporary
+    file raises :class:`DiagnosticCleanupError` and never touches the
+    published output.
     """
-    if path.is_symlink() or path.exists():
-        raise FileExistsError(f"output path already exists: {path}")
     if path.is_dir():
         raise IsADirectoryError(f"output path is a directory: {path}")
+    if path.is_symlink() or path.exists():
+        raise FileExistsError(f"output path already exists: {path}")
     parent = path.parent
     if not parent.is_dir():
         raise FileNotFoundError(f"output directory does not exist: {parent}")
@@ -180,11 +190,21 @@ def write_frequency_diagnostics(
                 writer.writerow(astuple(row))
                 count += 1
         os.link(temp_path, path)
-        os.unlink(temp_path)
-        return count
     except BaseException:
         try:
             temp_path.unlink()
         except OSError:
             pass
         raise
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        return count
+    except OSError:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            return count
+        except OSError as final_error:
+            raise DiagnosticCleanupError(path, temp_path) from final_error
+    return count
