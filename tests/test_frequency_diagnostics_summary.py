@@ -92,7 +92,7 @@ def _hand_dataset():
         _row(
             language="krl",
             word_id=4,
-            candidate_count=2,
+            candidate_count=3,
             gold_wordform_id=4,
             gold_gramset="N",
             top1_wordform_id=44,
@@ -133,7 +133,8 @@ HAND_EXPECTED = (
     "",
     "By candidate count",
     "candidate_count occurrences errors top1_accuracy",
-    "2 3 2 0.3333",
+    "2 2 1 0.5000",
+    "3 1 1 0.0000",
     "10 2 1 0.5000",
 )
 

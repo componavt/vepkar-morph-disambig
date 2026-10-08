@@ -101,7 +101,7 @@ def format_frequency_diagnostics_summary(
     for language in sorted(languages):
         group = languages[language]
         group_total = len(group)
-        group_errors = sum(1 for row in group if row.gold_rank > 1)
+        group_errors = sum(1 for row in group if row.gold_rank != 1)
         lines.append(
             f"{language} {group_total} {group_errors} "
             f"{_ratio(group_total - group_errors, group_total)}"
@@ -112,7 +112,7 @@ def format_frequency_diagnostics_summary(
     for candidate_count in sorted(candidate_counts):
         group = candidate_counts[candidate_count]
         group_total = len(group)
-        group_errors = sum(1 for row in group if row.gold_rank > 1)
+        group_errors = sum(1 for row in group if row.gold_rank != 1)
         lines.append(
             f"{candidate_count} {group_total} {group_errors} "
             f"{_ratio(group_total - group_errors, group_total)}"
