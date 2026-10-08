@@ -456,3 +456,28 @@ def test_write_diagnostics_cleanup_retry_succeeds(tmp_path, monkeypatch):
     assert header == DIAGNOSTICS_HEADER
     assert raw == [list(map(str, astuple(row))) for row in rows]
     assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+
+
+@pytest.mark.parametrize("retry_first", [False, True])
+def test_write_diagnostics_disappearing_temp_returns_count(
+    tmp_path, monkeypatch, retry_first
+):
+    rows = _diagnostic_rows()
+    path = tmp_path / "diagnostics.csv"
+    attempts = {"count": 0}
+
+    def disappearing_removal(self, real_unlink):
+        attempts["count"] += 1
+        if retry_first and attempts["count"] == 1:
+            raise PermissionError("transient failure")
+        real_unlink(self)
+        raise FileNotFoundError("temporary name disappeared")
+
+    _patch_diagnostics_unlink(monkeypatch, disappearing_removal)
+    count = write_frequency_diagnostics(path, rows)
+    assert count == len(rows)
+    header, raw = _read_csv(path)
+    assert header == DIAGNOSTICS_HEADER
+    assert raw == [list(map(str, astuple(row))) for row in rows]
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert attempts["count"] == (2 if retry_first else 1)

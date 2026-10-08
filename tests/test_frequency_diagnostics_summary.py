@@ -145,34 +145,51 @@ def test_hand_dataset_exact_report_lines():
 
 
 def test_hand_dataset_conservation_invariants():
-    rows = _hand_dataset()
-    n = len(rows)
-    correct = sum(1 for row in rows if row.gold_rank == 1)
-    errors = n - correct
-    assert correct + errors == n
+    lines = format_frequency_diagnostics_summary(_hand_dataset())
 
-    rank_counts = [0, 0, 0, 0]
-    for row in rows:
-        if row.gold_rank <= 3:
-            rank_counts[row.gold_rank - 1] += 1
-        else:
-            rank_counts[3] += 1
-    assert sum(rank_counts) == n
+    def scalar(prefix):
+        for line in lines:
+            if line.startswith(prefix):
+                return int(line[len(prefix):])
+        raise AssertionError(f"missing line prefix {prefix!r}")
 
-    frequency_groups = [0, 0, 0]
-    for row in rows:
-        if row.gold_rank == 1:
-            continue
-        if row.top1_train_frequency > row.gold_train_frequency:
-            frequency_groups[0] += 1
-        elif (
-            row.top1_train_frequency == row.gold_train_frequency
-            and row.gold_train_frequency > 0
-        ):
-            frequency_groups[1] += 1
-        elif row.top1_train_frequency == 0 and row.gold_train_frequency == 0:
-            frequency_groups[2] += 1
-    assert sum(frequency_groups) == errors
+    def table_sums(heading, header):
+        start = lines.index(heading)
+        assert lines[start + 1] == header
+        occurrences = 0
+        errors = 0
+        for line in lines[start + 2:]:
+            if not line:
+                break
+            fields = line.split()
+            occurrences += int(fields[1])
+            errors += int(fields[2])
+        return occurrences, errors
+
+    occurrences = scalar("Occurrences: ")
+    correct = scalar("Correct Top-1: ")
+    errors = scalar("Errors: ")
+    rank_buckets = [
+        scalar("Rank 1: "),
+        scalar("Rank 2: "),
+        scalar("Rank 3: "),
+        scalar("Rank >=4: "),
+    ]
+    error_categories = [
+        scalar("Errors with top1 frequency > gold: "),
+        scalar("Errors with equal positive frequencies: "),
+        scalar("Errors with both frequencies zero: "),
+    ]
+
+    assert correct + errors == occurrences
+    assert sum(rank_buckets) == occurrences
+    assert sum(error_categories) == errors
+    assert table_sums(
+        "By language", "language occurrences errors top1_accuracy"
+    ) == (occurrences, errors)
+    assert table_sums(
+        "By candidate count", "candidate_count occurrences errors top1_accuracy"
+    ) == (occurrences, errors)
 
 
 EMPTY_EXPECTED = (

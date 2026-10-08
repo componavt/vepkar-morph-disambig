@@ -1844,7 +1844,9 @@ def test_diagnose_cleanup_failure_reports_published_csv(
     assert "cannot write diagnostics CSV" not in captured.err
     header, raw = _read_generated(output)
     assert header == DIAGNOSTICS_HEADER
-    assert len(raw) == 1
+    assert raw == [
+        ["krl", "1", "kala", "2", "10", "N+SG+NOM", "10", "N+SG+NOM", "1", "0", "0"]
+    ]
     real_unlink(temps[0])
 
 
@@ -1880,7 +1882,9 @@ def test_diagnose_cleanup_retry_succeeds(tmp_path, monkeypatch, capsys):
     assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
     header, raw = _read_generated(output)
     assert header == DIAGNOSTICS_HEADER
-    assert len(raw) == 1
+    assert raw == [
+        ["krl", "1", "kala", "2", "10", "N+SG+NOM", "10", "N+SG+NOM", "1", "0", "0"]
+    ]
     assert "Traceback" not in captured.err
 
 
@@ -1910,6 +1914,43 @@ def test_diagnose_link_failure_leaves_no_output(tmp_path, monkeypatch, capsys):
     assert not output.exists()
     assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
     assert "Frequency diagnostics: OK" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_diagnose_competing_destination_creation(tmp_path, monkeypatch, capsys):
+    import cli as cli_pkg
+
+    _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
+    output = tmp_path / "diagnostics-dev.csv"
+    foreign = b"foreign competing destination bytes\n"
+
+    real_link = os.link
+
+    def competing_link(src, dst):
+        if Path(dst) == output:
+            with open(dst, "wb") as fh:
+                fh.write(foreign)
+        return real_link(src, dst)
+
+    monkeypatch.setattr(os, "link", competing_link)
+    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
+    status = cli_pkg._run_diagnose_frequency_baseline(
+        argparse.Namespace(
+            predictions=predictions,
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert output.read_bytes() == foreign
+    assert not list(tmp_path.glob(".vepkar-diagnostics-*.tmp"))
+    assert "cannot write diagnostics CSV" in captured.err
+    assert "CSV published, but temporary cleanup failed" not in captured.err
+    assert "Frequency diagnostics: OK" not in captured.out
+    assert "Summary" not in captured.out
+    assert "Occurrences:" not in captured.out
     assert "Traceback" not in captured.err
 
 
