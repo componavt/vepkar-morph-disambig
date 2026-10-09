@@ -34,7 +34,7 @@ def _read_split_rows(path: Path) -> tuple[tuple[str, int, str], ...]:
         with open(path, encoding="utf-8", newline="") as fh:
             reader = csv.reader(fh, strict=True)
             header = next(reader, None)
-            if tuple(header) != SPLIT_CSV_HEADER:
+            if tuple(header or ()) != SPLIT_CSV_HEADER:
                 raise SplitError(
                     f"cannot parse split CSV: {path}: unexpected header {header!r}"
                 )
