@@ -366,7 +366,7 @@ def test_validate_predictions_directory_path(tmp_path):
 def test_validate_predictions_unreadable_bypasses_benchmark_loading(
     tmp_path, monkeypatch, capsys, kind
 ):
-    import cli as cli_pkg
+    import commands.validate_predictions as validate_pkg
 
     checkout = _tagged_checkout(tmp_path)
     if kind == "directory":
@@ -378,8 +378,8 @@ def test_validate_predictions_unreadable_bypasses_benchmark_loading(
     def forbidden_load(*args, **kwargs):
         pytest.fail("Benchmark loading must not occur for an unreadable prediction path")
 
-    monkeypatch.setattr(cli_pkg, "load_benchmark_context", forbidden_load)
-    status = cli_pkg._run_validate_predictions(
+    monkeypatch.setattr(validate_pkg, "load_benchmark_context", forbidden_load)
+    status = validate_pkg._run_validate_predictions(
         argparse.Namespace(
             predictions=predictions,
             split="dev",
@@ -406,7 +406,7 @@ class _RecordingPath(Path):
 def test_validate_predictions_missing_checkout_priority_skips_open(
     tmp_path, monkeypatch, capsys
 ):
-    import cli as cli_pkg
+    import commands.validate_predictions as validate_pkg
 
     missing_checkout = tmp_path / "missing-dictorpus-data"
     _RecordingPath.opened = False
@@ -415,8 +415,8 @@ def test_validate_predictions_missing_checkout_priority_skips_open(
     def forbidden_load(*args, **kwargs):
         pytest.fail("Benchmark loading must not occur")
 
-    monkeypatch.setattr(cli_pkg, "load_benchmark_context", forbidden_load)
-    status = cli_pkg._run_validate_predictions(
+    monkeypatch.setattr(validate_pkg, "load_benchmark_context", forbidden_load)
+    status = validate_pkg._run_validate_predictions(
         argparse.Namespace(
             predictions=predictions,
             split="dev",
@@ -536,7 +536,7 @@ def test_validate_predictions_missing_checkout_checked_first(tmp_path):
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 def test_validate_predictions_benchmark_integrity_failure(tmp_path, monkeypatch, capsys):
     import benchmark_context as benchmark_pkg
-    import cli as cli_pkg
+    import commands.validate_predictions as validate_pkg
     from core.instances import Candidate, Instance
 
     checkout = _tagged_checkout(tmp_path)
@@ -572,7 +572,7 @@ def test_validate_predictions_benchmark_integrity_failure(tmp_path, monkeypatch,
         "build_language_instances",
         lambda lang, tables: StubResult((duplicate,)),
     )
-    status = cli_pkg._run_validate_predictions(
+    status = validate_pkg._run_validate_predictions(
         argparse.Namespace(
             predictions=predictions,
             split="dev",
@@ -1071,6 +1071,7 @@ def test_frequency_baseline_existing_output_rejected_before_loading(
 def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
     import benchmark_context as benchmark_pkg
     import cli as cli_pkg
+    import commands.validate_predictions as validate_pkg
 
     checkout = _tagged_checkout(tmp_path)
     split_file = tmp_path / "splits_dev.csv"
@@ -1104,9 +1105,10 @@ def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
         error_counts={},
         errors={},
     )
+    monkeypatch.setattr(validate_pkg, "validate_predictions", lambda **kwargs: valid)
     monkeypatch.setattr(cli_pkg, "validate_predictions", lambda **kwargs: valid)
 
-    status = cli_pkg._run_validate_predictions(
+    status = validate_pkg._run_validate_predictions(
         argparse.Namespace(
             predictions=predictions,
             split="dev",
@@ -1130,7 +1132,7 @@ def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
             "invalid score": ("word_id=1; score='nan'",),
         },
     )
-    cli_pkg._print_validation_failure(failed)
+    validate_pkg._print_validation_failure(failed)
     captured = capsys.readouterr()
     assert "Expected: 2,801 word instances, 6,950 candidate rows" in captured.out
     assert "Found: 2,800 word instances, 6,949 prediction rows" in captured.out
@@ -2427,3 +2429,68 @@ def test_diagnose_command_imports_without_cli_or_preparation():
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "commands.validate_predictions",
+        "commands.evaluate_predictions",
+    ],
+)
+def test_prediction_command_imports_without_cli_or_preparation(module_name):
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(SRC)!r})\n"
+        "import core.data as data\n"
+        "import core.instances as instances\n"
+        "import core.splits as splits\n"
+        "import core.predictions as predictions\n"
+        "import core.frequency as frequency\n"
+        "import core.metrics as metrics\n"
+        "import benchmark_context as benchmark\n"
+        "import commands.prediction_reports as reports\n"
+        "from pathlib import Path\n"
+        "\n"
+        "def fail(*args, **kwargs):\n"
+        "    raise AssertionError('dependency called during import')\n"
+        "\n"
+        "data.read_corpus_tables = fail\n"
+        "data.require_local_corpus = fail\n"
+        "data.resolve_data_dir = fail\n"
+        "instances.build_language_instances = fail\n"
+        "instances.determine_data_tag = fail\n"
+        "splits.split_csv_path = fail\n"
+        "benchmark._preflight_benchmark = fail\n"
+        "benchmark.load_benchmark_context = fail\n"
+        "benchmark._read_split_rows = fail\n"
+        "predictions.validate_predictions = fail\n"
+        "metrics.compute_ranking_metrics = fail\n"
+        "reports._print_validation_failure = fail\n"
+        "Path.open = fail\n"
+        "\n"
+        f"import {module_name}\n"
+        "\n"
+        "assert 'cli' not in sys.modules, 'cli must not be imported'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_read_split_rows_empty_split_reports_unexpected_header(tmp_path):
+    import benchmark_context
+    from core.splits import SplitError
+
+    path = tmp_path / "empty-split.csv"
+    path.touch()
+    with pytest.raises(SplitError) as raised:
+        benchmark_context._read_split_rows(path)
+    assert "unexpected header" in str(raised.value)
+    assert str(path) in str(raised.value)
