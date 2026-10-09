@@ -1710,9 +1710,11 @@ def _tiny_dev_fixture(tmp_path, name="predictions-dev.csv"):
     return instance, instances, split_rows, baseline, predictions
 
 
-def _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows):
+def _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows):
+    import benchmark_context
+
     def stub_context(data_dir, tag, split_file=None):
-        return cli_pkg.BenchmarkContext(
+        return benchmark_context.BenchmarkContext(
             tag=tag,
             split_path=split_file,
             instances=instances,
@@ -1720,14 +1722,16 @@ def _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows):
         )
 
     monkeypatch.setattr(
-        cli_pkg, "_preflight_benchmark", lambda data_dir: (data_dir, "fixture-tag")
+        diagnose_pkg,
+        "_preflight_benchmark",
+        lambda data_dir: (data_dir, "fixture-tag"),
     )
-    monkeypatch.setattr(cli_pkg, "load_benchmark_context", stub_context)
+    monkeypatch.setattr(diagnose_pkg, "load_benchmark_context", stub_context)
 
 
 @pytest.mark.parametrize("kind", ["score", "rank"])
 def test_diagnose_baseline_mismatch_explains_kind(tmp_path, monkeypatch, capsys, kind):
-    import cli as cli_pkg
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     _, instances, split_rows, baseline, predictions = _tiny_dev_fixture(tmp_path)
     if kind == "score":
@@ -1751,8 +1755,8 @@ def test_diagnose_baseline_mismatch_explains_kind(tmp_path, monkeypatch, capsys,
     ).is_valid
 
     output = tmp_path / "diagnostics-dev.csv"
-    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -1775,7 +1779,7 @@ def test_diagnose_baseline_mismatch_explains_kind(tmp_path, monkeypatch, capsys,
 def test_diagnose_baseline_read_error_explanation_printed(
     tmp_path, monkeypatch, capsys
 ):
-    import cli as cli_pkg
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
     output = tmp_path / "diagnostics-dev.csv"
@@ -1784,10 +1788,10 @@ def test_diagnose_baseline_read_error_explanation_printed(
         raise PredictionCsvParseError("unexpected header during verification")
 
     monkeypatch.setattr(
-        cli_pkg, "load_verified_frequency_predictions", fail_verification
+        diagnose_pkg, "load_verified_frequency_predictions", fail_verification
     )
-    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -1819,7 +1823,7 @@ def _patch_diagnostics_unlink(monkeypatch, failure):
 def test_diagnose_cleanup_failure_reports_published_csv(
     tmp_path, monkeypatch, capsys
 ):
-    import cli as cli_pkg
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
     output = tmp_path / "diagnostics-dev.csv"
@@ -1828,8 +1832,8 @@ def test_diagnose_cleanup_failure_reports_published_csv(
         raise PermissionError("cleanup denied")
 
     real_unlink = _patch_diagnostics_unlink(monkeypatch, fail_removal)
-    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -1856,7 +1860,7 @@ def test_diagnose_cleanup_failure_reports_published_csv(
 
 
 def test_diagnose_cleanup_retry_succeeds(tmp_path, monkeypatch, capsys):
-    import cli as cli_pkg
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
     output = tmp_path / "diagnostics-dev.csv"
@@ -1869,8 +1873,8 @@ def test_diagnose_cleanup_retry_succeeds(tmp_path, monkeypatch, capsys):
         return real_unlink(self)
 
     _patch_diagnostics_unlink(monkeypatch, flaky_removal)
-    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -1894,7 +1898,7 @@ def test_diagnose_cleanup_retry_succeeds(tmp_path, monkeypatch, capsys):
 
 
 def test_diagnose_link_failure_leaves_no_output(tmp_path, monkeypatch, capsys):
-    import cli as cli_pkg
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
     output = tmp_path / "diagnostics-dev.csv"
@@ -1903,8 +1907,8 @@ def test_diagnose_link_failure_leaves_no_output(tmp_path, monkeypatch, capsys):
         raise OSError("link denied")
 
     monkeypatch.setattr(os, "link", failing_link)
-    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -1923,7 +1927,7 @@ def test_diagnose_link_failure_leaves_no_output(tmp_path, monkeypatch, capsys):
 
 
 def test_diagnose_competing_destination_creation(tmp_path, monkeypatch, capsys):
-    import cli as cli_pkg
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
     output = tmp_path / "diagnostics-dev.csv"
@@ -1938,8 +1942,8 @@ def test_diagnose_competing_destination_creation(tmp_path, monkeypatch, capsys):
         return real_link(src, dst)
 
     monkeypatch.setattr(os, "link", competing_link)
-    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -2167,7 +2171,8 @@ def test_diagnose_missing_parent_rejected_without_creation(tmp_path):
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 def test_diagnose_preserves_unicode_commas_quotes(tmp_path, monkeypatch, capsys):
-    import cli as cli_pkg
+    import benchmark_context
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     checkout = _tagged_checkout(tmp_path)
     instances = (
@@ -2207,15 +2212,15 @@ def test_diagnose_preserves_unicode_commas_quotes(tmp_path, monkeypatch, capsys)
     output = tmp_path / "diagnostics-uni.csv"
 
     def stub_context(data_dir, tag, split_file=None):
-        return cli_pkg.BenchmarkContext(
+        return benchmark_context.BenchmarkContext(
             tag=tag,
             split_path=split_file or predictions,
             instances=instances,
             split_rows=split_rows,
         )
 
-    monkeypatch.setattr(cli_pkg, "load_benchmark_context", stub_context)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    monkeypatch.setattr(diagnose_pkg, "load_benchmark_context", stub_context)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -2241,12 +2246,12 @@ def test_diagnose_preserves_unicode_commas_quotes(tmp_path, monkeypatch, capsys)
 def test_diagnose_success_prints_summary_after_success_lines(
     tmp_path, monkeypatch, capsys
 ):
-    import cli as cli_pkg
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     _, instances, split_rows, baseline, predictions = _tiny_dev_fixture(tmp_path)
     output = tmp_path / "diagnostics-dev.csv"
-    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -2307,7 +2312,7 @@ def test_diagnose_success_prints_summary_after_success_lines(
 def test_diagnose_write_failure_suppresses_summary(
     tmp_path, monkeypatch, capsys, kind
 ):
-    import cli as cli_pkg
+    import commands.diagnose_frequency_baseline as diagnose_pkg
 
     _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
     output = tmp_path / "diagnostics-dev.csv"
@@ -2315,13 +2320,13 @@ def test_diagnose_write_failure_suppresses_summary(
     def fail_write(path, rows):
         if kind == "oserror":
             raise OSError("disk full")
-        raise cli_pkg.DiagnosticCleanupError(
+        raise diagnose_pkg.DiagnosticCleanupError(
             output, tmp_path / "diagnostics-temp.tmp"
         ) from PermissionError("cleanup denied")
 
-    monkeypatch.setattr(cli_pkg, "write_frequency_diagnostics", fail_write)
-    _stub_diagnose_preflight(monkeypatch, cli_pkg, instances, split_rows)
-    status = cli_pkg._run_diagnose_frequency_baseline(
+    monkeypatch.setattr(diagnose_pkg, "write_frequency_diagnostics", fail_write)
+    _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows)
+    status = diagnose_pkg._run_diagnose_frequency_baseline(
         argparse.Namespace(
             predictions=predictions,
             output=output,
@@ -2373,3 +2378,52 @@ def test_benchmark_context_imports_without_cli_or_preparation():
         cwd=ROOT,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_diagnose_command_imports_without_cli_or_preparation():
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(SRC)!r})\n"
+        "import core.data as data\n"
+        "import core.instances as instances\n"
+        "import core.splits as splits\n"
+        "import core.predictions as predictions\n"
+        "import core.frequency as frequency\n"
+        "import core.diagnostics as diagnostics\n"
+        "import frequency_diagnostics_io as diag_io\n"
+        "import frequency_diagnostics_summary as diag_summary\n"
+        "import benchmark_context as benchmark\n"
+        "import commands.prediction_reports as reports\n"
+        "\n"
+        "def fail(*args, **kwargs):\n"
+        "    raise AssertionError('dependency called during import')\n"
+        "\n"
+        "data.read_corpus_tables = fail\n"
+        "data.require_local_corpus = fail\n"
+        "data.resolve_data_dir = fail\n"
+        "instances.build_language_instances = fail\n"
+        "instances.determine_data_tag = fail\n"
+        "splits.split_csv_path = fail\n"
+        "benchmark._preflight_benchmark = fail\n"
+        "benchmark.load_benchmark_context = fail\n"
+        "predictions.validate_predictions = fail\n"
+        "frequency.rank_by_train_frequency = fail\n"
+        "diagnostics.build_frequency_diagnostics = fail\n"
+        "diag_io.load_verified_frequency_predictions = fail\n"
+        "diag_io.write_frequency_diagnostics = fail\n"
+        "diag_summary.format_frequency_diagnostics_summary = fail\n"
+        "reports._print_validation_failure = fail\n"
+        "\n"
+        "import commands.diagnose_frequency_baseline\n"
+        "\n"
+        "assert 'cli' not in sys.modules, 'cli must not be imported'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
