@@ -535,6 +535,7 @@ def test_validate_predictions_missing_checkout_checked_first(tmp_path):
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 def test_validate_predictions_benchmark_integrity_failure(tmp_path, monkeypatch, capsys):
+    import benchmark_context as benchmark_pkg
     import cli as cli_pkg
     from core.instances import Candidate, Instance
 
@@ -565,9 +566,11 @@ def test_validate_predictions_benchmark_integrity_failure(tmp_path, monkeypatch,
         def __init__(self, instances):
             self.instances = instances
 
-    monkeypatch.setattr(cli_pkg, "read_corpus_tables", stub_tables)
+    monkeypatch.setattr(benchmark_pkg, "read_corpus_tables", stub_tables)
     monkeypatch.setattr(
-        cli_pkg, "build_language_instances", lambda lang, tables: StubResult((duplicate,))
+        benchmark_pkg,
+        "build_language_instances",
+        lambda lang, tables: StubResult((duplicate,)),
     )
     status = cli_pkg._run_validate_predictions(
         argparse.Namespace(
@@ -1028,6 +1031,7 @@ def test_frequency_baseline_missing_checkout_before_existing_output(tmp_path):
 def test_frequency_baseline_existing_output_rejected_before_loading(
     tmp_path, monkeypatch, capsys
 ):
+    import benchmark_context as benchmark_pkg
     import cli as cli_pkg
 
     checkout = _tagged_checkout(tmp_path)
@@ -1040,10 +1044,10 @@ def test_frequency_baseline_existing_output_rejected_before_loading(
         raise AssertionError("read_corpus_tables must not be called")
 
     resolved = []
-    real_tag = cli_pkg.determine_data_tag
-    monkeypatch.setattr(cli_pkg, "read_corpus_tables", fail_tables)
+    real_tag = benchmark_pkg.determine_data_tag
+    monkeypatch.setattr(benchmark_pkg, "read_corpus_tables", fail_tables)
     monkeypatch.setattr(
-        cli_pkg,
+        benchmark_pkg,
         "determine_data_tag",
         lambda data_dir: resolved.append(True) or real_tag(data_dir),
     )
@@ -1065,6 +1069,7 @@ def test_frequency_baseline_existing_output_rejected_before_loading(
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
+    import benchmark_context as benchmark_pkg
     import cli as cli_pkg
 
     checkout = _tagged_checkout(tmp_path)
@@ -1075,14 +1080,14 @@ def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
         instances = ()
 
     monkeypatch.setattr(
-        cli_pkg, "read_corpus_tables", lambda lang, data_dir: object()
+        benchmark_pkg, "read_corpus_tables", lambda lang, data_dir: object()
     )
     monkeypatch.setattr(
-        cli_pkg,
+        benchmark_pkg,
         "build_language_instances",
         lambda lang, tables: EmptyInstances(),
     )
-    monkeypatch.setattr(cli_pkg, "_read_split_rows", lambda path: ())
+    monkeypatch.setattr(benchmark_pkg, "_read_split_rows", lambda path: ())
 
     predictions = tmp_path / "predictions.csv"
     predictions.write_text(
@@ -2337,3 +2342,34 @@ def test_diagnose_write_failure_suppresses_summary(
     assert "Summary" not in captured.out
     assert "Occurrences:" not in captured.out
     assert "Traceback" not in captured.err
+
+
+def test_benchmark_context_imports_without_cli_or_preparation():
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(SRC)!r})\n"
+        "import core.data as data\n"
+        "import core.instances as instances\n"
+        "import core.splits as splits\n"
+        "\n"
+        "def fail(*args, **kwargs):\n"
+        "    raise AssertionError('preparation dependency called during import')\n"
+        "\n"
+        "data.read_corpus_tables = fail\n"
+        "data.require_local_corpus = fail\n"
+        "data.resolve_data_dir = fail\n"
+        "instances.build_language_instances = fail\n"
+        "instances.determine_data_tag = fail\n"
+        "splits.split_csv_path = fail\n"
+        "\n"
+        "import benchmark_context\n"
+        "\n"
+        "assert 'cli' not in sys.modules, 'cli must not be imported'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
