@@ -29,6 +29,8 @@ from core.frequency import (  # noqa: E402
 from core.instances import Candidate, Instance, build_language_instances  # noqa: E402
 from core.predictions import (  # noqa: E402
     PredictionCsvParseError,
+    PredictionFileReadError,
+    PredictionRow,
     validate_predictions,
 )
 from frequency_diagnostics_io import load_verified_frequency_predictions  # noqa: E402
@@ -1032,7 +1034,7 @@ def test_frequency_baseline_existing_output_rejected_before_loading(
     tmp_path, monkeypatch, capsys
 ):
     import benchmark_context as benchmark_pkg
-    import cli as cli_pkg
+    import commands.frequency_baseline as freq_pkg
 
     checkout = _tagged_checkout(tmp_path)
     split_file = tmp_path / "splits_dev.csv"
@@ -1051,7 +1053,7 @@ def test_frequency_baseline_existing_output_rejected_before_loading(
         "determine_data_tag",
         lambda data_dir: resolved.append(True) or real_tag(data_dir),
     )
-    status = cli_pkg._run_frequency_baseline(
+    status = freq_pkg._run_frequency_baseline(
         argparse.Namespace(
             split="dev",
             output=output,
@@ -1070,7 +1072,7 @@ def test_frequency_baseline_existing_output_rejected_before_loading(
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
     import benchmark_context as benchmark_pkg
-    import cli as cli_pkg
+    import commands.frequency_baseline as freq_pkg
     import commands.validate_predictions as validate_pkg
 
     checkout = _tagged_checkout(tmp_path)
@@ -1106,7 +1108,7 @@ def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
         errors={},
     )
     monkeypatch.setattr(validate_pkg, "validate_predictions", lambda **kwargs: valid)
-    monkeypatch.setattr(cli_pkg, "validate_predictions", lambda **kwargs: valid)
+    monkeypatch.setattr(freq_pkg, "validate_predictions", lambda **kwargs: valid)
 
     status = validate_pkg._run_validate_predictions(
         argparse.Namespace(
@@ -1153,18 +1155,18 @@ def test_report_counts_use_thousands_separators(tmp_path, monkeypatch, capsys):
     frequency = Counter({(index, "G"): 1 for index in range(7313)})
     frequency[(99999, "G")] += 22390 - 7313
     monkeypatch.setattr(
-        cli_pkg,
+        freq_pkg,
         "rank_by_train_frequency",
         lambda instances, split_rows, split: rows,
     )
     monkeypatch.setattr(
-        cli_pkg,
+        freq_pkg,
         "build_train_frequency",
         lambda instances, split_rows: frequency,
     )
 
     output = tmp_path / "frequency-out.csv"
-    status = cli_pkg._run_frequency_baseline(
+    status = freq_pkg._run_frequency_baseline(
         argparse.Namespace(
             split="dev",
             output=output,
@@ -1343,6 +1345,50 @@ def test_evaluate_predictions_malformed_csv(tmp_path):
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+@pytest.mark.parametrize(
+    "error_type", [PredictionFileReadError, PredictionCsvParseError]
+)
+def test_evaluate_predictions_reread_failure_handled(
+    tmp_path, monkeypatch, capsys, error_type
+):
+    import commands.evaluate_predictions as evaluate_pkg
+
+    checkout = _tagged_checkout(tmp_path)
+    instances = _strict_instances(checkout)
+    split_file = tmp_path / "splits_dev.csv"
+    _write_split_fixture(split_file, instances, "dev")
+    predictions = tmp_path / "predictions_dev.csv"
+    _write_valid_predictions(predictions, instances)
+
+    def fail_load(path):
+        raise error_type("distinctive reread explanation")
+
+    def fail_metrics(*args, **kwargs):
+        pytest.fail("compute_ranking_metrics must not be called")
+
+    monkeypatch.setattr(evaluate_pkg, "load_ranked_predictions", fail_load)
+    monkeypatch.setattr(evaluate_pkg, "compute_ranking_metrics", fail_metrics)
+    status = evaluate_pkg.run_evaluate_predictions(
+        argparse.Namespace(
+            predictions=predictions,
+            split="dev",
+            data_dir=checkout,
+            split_file=split_file,
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "error: cannot load predictions for evaluation:" in captured.err
+    assert str(predictions) in captured.err
+    assert "distinctive reread explanation" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Prediction evaluation: OK" not in captured.out
+    assert "Top-1 accuracy" not in captured.out
+    assert "MRR" not in captured.out
+    assert "Top-3 accuracy" not in captured.out
+
+
 def test_evaluate_predictions_missing_checkout_checked_first(tmp_path):
     missing = tmp_path / "missing-dictorpus-data"
     result = run_cli(
@@ -1450,6 +1496,109 @@ def test_evaluate_predictions_metrics_match_hand_calculated(tmp_path):
     assert "MRR                0.5000" in result.stdout
     assert "Top-3 accuracy     1.0000" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+def test_load_ranked_predictions_returns_general_prediction_rows(tmp_path):
+    import commands.evaluate_predictions as evaluate_pkg
+
+    path = tmp_path / "predictions.csv"
+    path.write_text(
+        "word_id,wordform_id,gramset,rank,score\n"
+        "501,9001,SG+NOM,1,2.5\n"
+        "501,9001,SG+ACC,2,-0.75\n"
+        "502,7712,SG+NOM,1,1.125\n",
+        encoding="utf-8",
+    )
+    rows = evaluate_pkg.load_ranked_predictions(path)
+    assert all(isinstance(row, PredictionRow) for row in rows)
+    assert rows == [
+        PredictionRow(word_id=501, wordform_id=9001, gramset="SG+NOM", rank=1, score=2.5),
+        PredictionRow(
+            word_id=501, wordform_id=9001, gramset="SG+ACC", rank=2, score=-0.75
+        ),
+        PredictionRow(
+            word_id=502, wordform_id=7712, gramset="SG+NOM", rank=1, score=1.125
+        ),
+    ]
+
+
+def test_fractional_scores_validate_and_evaluate_hand_calculated(tmp_path):
+    import commands.evaluate_predictions as evaluate_pkg
+    from core.metrics import compute_ranking_metrics
+
+    instances = [
+        Instance(
+            language="krl",
+            word_id=1,
+            sentence_id=1,
+            text_id=1,
+            word="w1",
+            word_number=1,
+            sentence_xml="<s/>",
+            candidates=(Candidate(10, "A"), Candidate(11, "B"), Candidate(12, "C")),
+            gold_analysis=Candidate(10, "A"),
+        ),
+        Instance(
+            language="krl",
+            word_id=2,
+            sentence_id=2,
+            text_id=1,
+            word="w2",
+            word_number=1,
+            sentence_xml="<s/>",
+            candidates=(Candidate(20, "A"), Candidate(21, "B"), Candidate(22, "C")),
+            gold_analysis=Candidate(21, "B"),
+        ),
+        Instance(
+            language="krl",
+            word_id=3,
+            sentence_id=3,
+            text_id=1,
+            word="w3",
+            word_number=1,
+            sentence_xml="<s/>",
+            candidates=(
+                Candidate(30, "A"),
+                Candidate(31, "B"),
+                Candidate(32, "C"),
+                Candidate(33, "D"),
+            ),
+            gold_analysis=Candidate(33, "D"),
+        ),
+    ]
+    split_rows = (("krl", 1, "dev"),)
+    predictions = tmp_path / "predictions.csv"
+    predictions.write_text(
+        "word_id,wordform_id,gramset,rank,score\n"
+        "1,10,A,1,2.5\n"
+        "1,11,B,2,1.0\n"
+        "1,12,C,3,-0.5\n"
+        "2,20,A,1,1.5\n"
+        "2,21,B,2,0.25\n"
+        "2,22,C,3,-1.0\n"
+        "3,30,A,1,2.0\n"
+        "3,31,B,2,1.0\n"
+        "3,32,C,3,0.5\n"
+        "3,33,D,4,-2.0\n",
+        encoding="utf-8",
+    )
+    validation = validate_predictions(
+        predictions_path=predictions,
+        split="dev",
+        instances=instances,
+        split_rows=split_rows,
+    )
+    assert validation.is_valid
+    assert validation.errors == {}
+    rows = evaluate_pkg.load_ranked_predictions(predictions)
+    assert [row.word_id for row in rows] == [1, 1, 1, 2, 2, 2, 3, 3, 3, 3]
+    metrics = compute_ranking_metrics(instances, rows)
+    assert metrics.word_count == 3
+    assert metrics.top1_correct == 1
+    assert metrics.top3_correct == 2
+    assert metrics.top1_accuracy == pytest.approx(1 / 3)
+    assert metrics.mrr == pytest.approx((1 + 1 / 2 + 1 / 4) / 3)
+    assert metrics.top3_accuracy == pytest.approx(2 / 3)
 
 
 def _text_keys(instances) -> list[tuple[str, int]]:
@@ -2470,6 +2619,49 @@ def test_prediction_command_imports_without_cli_or_preparation(module_name):
         "Path.open = fail\n"
         "\n"
         f"import {module_name}\n"
+        "\n"
+        "assert 'cli' not in sys.modules, 'cli must not be imported'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_frequency_baseline_command_imports_without_cli_or_preparation():
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(SRC)!r})\n"
+        "import core.data as data\n"
+        "import core.instances as instances\n"
+        "import core.splits as splits\n"
+        "import core.predictions as predictions\n"
+        "import core.frequency as frequency\n"
+        "import benchmark_context as benchmark\n"
+        "import commands.prediction_reports as reports\n"
+        "\n"
+        "def fail(*args, **kwargs):\n"
+        "    raise AssertionError('dependency called during import')\n"
+        "\n"
+        "data.read_corpus_tables = fail\n"
+        "data.require_local_corpus = fail\n"
+        "data.resolve_data_dir = fail\n"
+        "instances.build_language_instances = fail\n"
+        "instances.determine_data_tag = fail\n"
+        "splits.split_csv_path = fail\n"
+        "benchmark._preflight_benchmark = fail\n"
+        "benchmark.load_benchmark_context = fail\n"
+        "predictions.validate_predictions = fail\n"
+        "frequency.rank_by_train_frequency = fail\n"
+        "frequency.build_train_frequency = fail\n"
+        "reports._print_validation_failure = fail\n"
+        "\n"
+        "import commands.frequency_baseline\n"
         "\n"
         "assert 'cli' not in sys.modules, 'cli must not be imported'\n"
     )

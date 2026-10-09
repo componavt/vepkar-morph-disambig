@@ -15,7 +15,6 @@ from core.data import (
     require_local_corpus,
     resolve_data_dir,
 )
-from core.frequency import FrequencyPrediction
 from core.instances import (
     CorpusTagError,
     Instance,
@@ -32,6 +31,7 @@ from core.predictions import (
     BenchmarkIntegrityError,
     PredictionCsvParseError,
     PredictionFileReadError,
+    PredictionRow,
     validate_predictions,
 )
 from core.splits import (
@@ -43,9 +43,9 @@ from core.splits import (
 from commands.prediction_reports import _print_validation_failure
 
 
-def load_ranked_predictions(path: Path) -> list[FrequencyPrediction]:
+def load_ranked_predictions(path: Path) -> list[PredictionRow]:
     """Read an already validated predictions CSV into ranked prediction rows."""
-    rows: list[FrequencyPrediction] = []
+    rows: list[PredictionRow] = []
 
     try:
         with path.open("r", encoding="utf-8", newline="") as fh:
@@ -77,7 +77,7 @@ def load_ranked_predictions(path: Path) -> list[FrequencyPrediction]:
                     ) from exc
 
                 rows.append(
-                    FrequencyPrediction(
+                    PredictionRow(
                         word_id=word_id,
                         wordform_id=wordform_id,
                         gramset=raw[2],
@@ -184,7 +184,13 @@ def run_evaluate_predictions(args: argparse.Namespace) -> int:
         _print_validation_failure(validation)
         return 1
 
-    prediction_rows = load_ranked_predictions(args.predictions)
+    try:
+        prediction_rows = load_ranked_predictions(args.predictions)
+    except (PredictionFileReadError, PredictionCsvParseError) as exc:
+        print("error: cannot load predictions for evaluation:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
 
     split_texts = {
         (language, text_id)

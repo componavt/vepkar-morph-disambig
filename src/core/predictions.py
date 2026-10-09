@@ -69,7 +69,7 @@ def _parse_score(value: str) -> float | None:
 
 
 @dataclass(frozen=True)
-class _PredictionRow:
+class PredictionRow:
     """One well-formed prediction row."""
 
     word_id: int
@@ -140,8 +140,8 @@ def validate_predictions(
 
     errors: dict[str, list[str]] = {}
     error_counts: dict[str, int] = {}
-    rows: list[_PredictionRow] = []
-    rows_by_word: dict[int, list[_PredictionRow]] = {}
+    rows: list[PredictionRow] = []
+    rows_by_word: dict[int, list[PredictionRow]] = {}
     seen_identities: set[tuple[int, int, str]] = set()
 
     try:
@@ -231,7 +231,7 @@ def validate_predictions(
                         )
                     else:
                         seen_identities.add(identity)
-                    row = _PredictionRow(word_id, wordform_id, gramset, rank, score)
+                    row = PredictionRow(word_id, wordform_id, gramset, rank, score)
                     rows.append(row)
                     rows_by_word.setdefault(word_id, []).append(row)
     except csv.Error as exc:

@@ -15,6 +15,7 @@ from core.predictions import (  # noqa: E402
     BenchmarkIntegrityError,
     PredictionCsvParseError,
     PredictionFileReadError,
+    PredictionRow,
     validate_predictions,
 )
 
@@ -405,3 +406,22 @@ def test_duplicate_benchmark_word_id(tmp_path):
             duplicate_instances,
             SPLIT_ROWS,
         )
+
+
+def test_prediction_row_is_public_frozen_dataclass():
+    from dataclasses import FrozenInstanceError, fields
+
+    assert PredictionRow.__dataclass_params__.frozen is True
+    assert PredictionRow.__module__ == "core.predictions"
+    assert [field.name for field in fields(PredictionRow)] == [
+        "word_id",
+        "wordform_id",
+        "gramset",
+        "rank",
+        "score",
+    ]
+    assert fields(PredictionRow)[4].type in (float, "float")
+    row = PredictionRow(word_id=501, wordform_id=9001, gramset="SG+NOM", rank=1, score=2.5)
+    assert row.score == 2.5
+    with pytest.raises(FrozenInstanceError):
+        row.score = 3.0
