@@ -1522,7 +1522,9 @@ def test_load_ranked_predictions_returns_general_prediction_rows(tmp_path):
     ]
 
 
-def test_fractional_scores_validate_and_evaluate_hand_calculated(tmp_path):
+def test_fractional_scores_validate_and_evaluate_hand_calculated(
+    tmp_path, monkeypatch, capsys
+):
     import commands.evaluate_predictions as evaluate_pkg
     from core.metrics import compute_ranking_metrics
 
@@ -1599,6 +1601,54 @@ def test_fractional_scores_validate_and_evaluate_hand_calculated(tmp_path):
     assert metrics.top1_accuracy == pytest.approx(1 / 3)
     assert metrics.mrr == pytest.approx((1 + 1 / 2 + 1 / 4) / 3)
     assert metrics.top3_accuracy == pytest.approx(2 / 3)
+
+    split_file = tmp_path / "splits_dev.csv"
+    split_file.write_text("language,text_id,split\nkrl,1,dev\n", encoding="utf-8")
+
+    def stub_data_dir(data_dir):
+        return data_dir
+
+    monkeypatch.setattr(evaluate_pkg, "resolve_data_dir", stub_data_dir)
+    monkeypatch.setattr(
+        evaluate_pkg, "require_local_corpus", lambda data_dir: data_dir
+    )
+    monkeypatch.setattr(
+        evaluate_pkg, "determine_data_tag", lambda data_dir: "fixture-tag"
+    )
+    monkeypatch.setattr(
+        evaluate_pkg, "read_corpus_tables", lambda lang, data_dir: object()
+    )
+    monkeypatch.setattr(
+        evaluate_pkg,
+        "build_language_instances",
+        lambda lang, tables: (
+            SimpleNamespace(instances=instances)
+            if lang == "krl"
+            else SimpleNamespace(instances=())
+        ),
+    )
+
+    before_bytes = predictions.read_bytes()
+    before_files = {path.name for path in tmp_path.iterdir()}
+    status = evaluate_pkg.run_evaluate_predictions(
+        argparse.Namespace(
+            predictions=predictions,
+            split="dev",
+            data_dir=tmp_path,
+            split_file=split_file,
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert captured.err == ""
+    assert "Prediction evaluation: OK" in captured.out
+    assert "Split: dev" in captured.out
+    assert "Evaluated: 3 word instances, 10 candidate rows" in captured.out
+    assert "Top-1 accuracy     0.3333" in captured.out
+    assert "MRR                0.5833" in captured.out
+    assert "Top-3 accuracy     0.6667" in captured.out
+    assert predictions.read_bytes() == before_bytes
+    assert {path.name for path in tmp_path.iterdir()} == before_files
 
 
 def _text_keys(instances) -> list[tuple[str, int]]:
@@ -1878,6 +1928,196 @@ def _stub_diagnose_preflight(monkeypatch, diagnose_pkg, instances, split_rows):
         lambda data_dir: (data_dir, "fixture-tag"),
     )
     monkeypatch.setattr(diagnose_pkg, "load_benchmark_context", stub_context)
+
+
+def _stub_frequency_preflight(monkeypatch, freq_pkg, instances, split_rows):
+    import benchmark_context
+
+    def stub_context(data_dir, tag, split_file=None):
+        return benchmark_context.BenchmarkContext(
+            tag=tag,
+            split_path=split_file,
+            instances=instances,
+            split_rows=split_rows,
+        )
+
+    monkeypatch.setattr(
+        freq_pkg,
+        "_preflight_benchmark",
+        lambda data_dir: (data_dir, "fixture-tag"),
+    )
+    monkeypatch.setattr(freq_pkg, "load_benchmark_context", stub_context)
+
+
+def _patch_frequency_unlink(monkeypatch, failure):
+    real_unlink = Path.unlink
+
+    def patched_unlink(self, *args, **kwargs):
+        if self.name.startswith(".vepkar-frequency-") and self.name.endswith(".tmp"):
+            return failure(self, real_unlink)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", patched_unlink)
+    return real_unlink
+
+
+def _expected_frequency_rows(baseline):
+    return [
+        [str(row.word_id), str(row.wordform_id), row.gramset, str(row.rank), str(row.score)]
+        for row in baseline
+    ]
+
+
+def _run_frequency_baseline_publication(tmp_path, monkeypatch, failure_kind):
+    import commands.frequency_baseline as freq_pkg
+
+    _, instances, split_rows, _, _ = _tiny_dev_fixture(tmp_path)
+    _stub_frequency_preflight(monkeypatch, freq_pkg, instances, split_rows)
+    output = tmp_path / "frequency-dev.csv"
+    foreign = b"foreign competing destination bytes\n"
+
+    if failure_kind == "temp_creation":
+
+        def fail_mkstemp(*args, **kwargs):
+            raise OSError("disk full during temporary creation")
+
+        monkeypatch.setattr(freq_pkg.tempfile, "mkstemp", fail_mkstemp)
+        distinctive = "could not create a temporary file"
+    elif failure_kind == "temp_write":
+        real_open = Path.open
+
+        def fail_temp_open(self, *args, **kwargs):
+            if self.name.startswith(".vepkar-frequency-") and self.name.endswith(
+                ".tmp"
+            ):
+                raise OSError("disk full during temporary write")
+            return real_open(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", fail_temp_open)
+        distinctive = "could not write the temporary frequency baseline CSV"
+    elif failure_kind == "link":
+
+        def failing_link(src, dst):
+            raise OSError("link denied")
+
+        monkeypatch.setattr(freq_pkg.os, "link", failing_link)
+        distinctive = "could not publish the frequency baseline CSV"
+    else:
+        real_link = os.link
+
+        def competing_link(src, dst):
+            if Path(dst) == output:
+                with open(dst, "wb") as fh:
+                    fh.write(foreign)
+            return real_link(src, dst)
+
+        monkeypatch.setattr(freq_pkg.os, "link", competing_link)
+        distinctive = "could not publish the frequency baseline CSV"
+
+    status = freq_pkg._run_frequency_baseline(
+        argparse.Namespace(
+            split="dev",
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    return status, output, distinctive, foreign
+
+
+@pytest.mark.parametrize(
+    "kind", ["temp_creation", "temp_write", "link", "competing"]
+)
+def test_frequency_baseline_publication_failure_leaves_no_output(
+    tmp_path, monkeypatch, capsys, kind
+):
+    status, output, distinctive, foreign = _run_frequency_baseline_publication(
+        tmp_path, monkeypatch, kind
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert distinctive in captured.err
+    assert "Traceback" not in captured.err
+    assert "Frequency baseline: OK" not in captured.out
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    if kind == "competing":
+        assert output.read_bytes() == foreign
+        assert "temporary cleanup failed" not in captured.err
+    else:
+        assert not output.exists()
+
+
+def test_frequency_baseline_cleanup_retry_succeeds(tmp_path, monkeypatch, capsys):
+    import commands.frequency_baseline as freq_pkg
+
+    _, instances, split_rows, baseline, _ = _tiny_dev_fixture(tmp_path)
+    _stub_frequency_preflight(monkeypatch, freq_pkg, instances, split_rows)
+    output = tmp_path / "frequency-dev.csv"
+    attempts = {"count": 0}
+
+    def flaky_removal(self, real_unlink):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("transient failure")
+        return real_unlink(self)
+
+    _patch_frequency_unlink(monkeypatch, flaky_removal)
+    status = freq_pkg._run_frequency_baseline(
+        argparse.Namespace(
+            split="dev",
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 0, captured.err
+    assert attempts["count"] == 2
+    assert "Frequency baseline: OK" in captured.out
+    assert "Validation: OK" in captured.out
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    header, raw = _read_generated(output)
+    assert header == ["word_id", "wordform_id", "gramset", "rank", "score"]
+    assert raw == _expected_frequency_rows(baseline)
+    assert "Traceback" not in captured.err
+
+
+def test_frequency_baseline_cleanup_failure_reports_published_csv(
+    tmp_path, monkeypatch, capsys
+):
+    import commands.frequency_baseline as freq_pkg
+
+    _, instances, split_rows, baseline, _ = _tiny_dev_fixture(tmp_path)
+    _stub_frequency_preflight(monkeypatch, freq_pkg, instances, split_rows)
+    output = tmp_path / "frequency-dev.csv"
+
+    def fail_removal(self, real_unlink):
+        raise PermissionError("cleanup denied")
+
+    real_unlink = _patch_frequency_unlink(monkeypatch, fail_removal)
+    status = freq_pkg._run_frequency_baseline(
+        argparse.Namespace(
+            split="dev",
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "Frequency baseline CSV published, but temporary cleanup failed" in captured.err
+    assert f"output: {output}" in captured.err
+    temps = list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    assert len(temps) == 1
+    assert f"temporary: {temps[0]}" in captured.err
+    assert "cleanup denied" in captured.err
+    assert "could not publish the frequency baseline CSV" not in captured.err
+    assert "Frequency baseline: OK" not in captured.out
+    assert "Validation: OK" not in captured.out
+    header, raw = _read_generated(output)
+    assert header == ["word_id", "wordform_id", "gramset", "rank", "score"]
+    assert raw == _expected_frequency_rows(baseline)
+    real_unlink(temps[0])
 
 
 @pytest.mark.parametrize("kind", ["score", "rank"])

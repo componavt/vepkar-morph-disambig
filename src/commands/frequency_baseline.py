@@ -29,6 +29,29 @@ from core.splits import SplitError
 from commands.prediction_reports import _print_validation_failure
 
 
+class FrequencyBaselineCleanupError(OSError):
+    def __init__(self, output_path: Path, temp_path: Path):
+        self.output_path = output_path
+        self.temp_path = temp_path
+        super().__init__(
+            "Frequency baseline CSV published, but temporary cleanup failed"
+        )
+
+
+def _remove_temporary_frequency_csv(output_path: Path, temp_path: Path) -> None:
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as final_error:
+            raise FrequencyBaselineCleanupError(output_path, temp_path) from final_error
+
+
 def _run_frequency_baseline(args: argparse.Namespace) -> int:
     output_path = Path(args.output)
     try:
@@ -68,20 +91,51 @@ def _run_frequency_baseline(args: argparse.Namespace) -> int:
     word_count = len({row.word_id for row in rows})
     candidate_count = len(rows)
 
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=".vepkar-frequency-", suffix=".tmp", dir=str(output_path.parent)
-    )
-    os.close(descriptor)
-    temp_path = Path(temp_name)
+    temp_path: Path | None = None
     published = False
     try:
-        with temp_path.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(PREDICTION_HEADER)
-            for row in rows:
-                writer.writerow(
-                    [row.word_id, row.wordform_id, row.gramset, row.rank, row.score]
-                )
+        try:
+            descriptor, temp_name = tempfile.mkstemp(
+                prefix=".vepkar-frequency-",
+                suffix=".tmp",
+                dir=str(output_path.parent),
+            )
+        except OSError as exc:
+            print(
+                "error: could not create a temporary file for the frequency "
+                "baseline CSV:",
+                file=sys.stderr,
+            )
+            print(f"  {output_path.parent}", file=sys.stderr)
+            print(f"  {exc}", file=sys.stderr)
+            return 1
+        temp_path = Path(temp_name)
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            print(
+                "error: could not close the temporary file descriptor:",
+                file=sys.stderr,
+            )
+            print(f"  {temp_path}", file=sys.stderr)
+            print(f"  {exc}", file=sys.stderr)
+            return 1
+        try:
+            with temp_path.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(PREDICTION_HEADER)
+                for row in rows:
+                    writer.writerow(
+                        [row.word_id, row.wordform_id, row.gramset, row.rank, row.score]
+                    )
+        except OSError as exc:
+            print(
+                "error: could not write the temporary frequency baseline CSV:",
+                file=sys.stderr,
+            )
+            print(f"  {temp_path}", file=sys.stderr)
+            print(f"  {exc}", file=sys.stderr)
+            return 1
         try:
             validation = validate_predictions(
                 predictions_path=temp_path,
@@ -123,11 +177,45 @@ def _run_frequency_baseline(args: argparse.Namespace) -> int:
             )
             _print_validation_failure(validation)
             return 1
-        os.replace(temp_path, output_path)
+        try:
+            os.link(temp_path, output_path)
+        except OSError as exc:
+            print(
+                "error: could not publish the frequency baseline CSV:",
+                file=sys.stderr,
+            )
+            print(f"  {temp_path}", file=sys.stderr)
+            print(f"  {output_path}", file=sys.stderr)
+            print(f"  {exc}", file=sys.stderr)
+            return 1
         published = True
     finally:
-        if not published and temp_path.exists():
-            temp_path.unlink()
+        if temp_path is not None and not published:
+            try:
+                temp_path.unlink()
+            except OSError as cleanup_error:
+                print(
+                    "error: could not remove the temporary frequency baseline "
+                    "file during cleanup:",
+                    file=sys.stderr,
+                )
+                print(f"  {temp_path}", file=sys.stderr)
+                print(f"  {cleanup_error}", file=sys.stderr)
+
+    if temp_path is not None:
+        try:
+            _remove_temporary_frequency_csv(output_path, temp_path)
+        except FrequencyBaselineCleanupError as exc:
+            print(
+                "error: Frequency baseline CSV published, but temporary "
+                "cleanup failed:",
+                file=sys.stderr,
+            )
+            print(f"  output: {exc.output_path}", file=sys.stderr)
+            print(f"  temporary: {exc.temp_path}", file=sys.stderr)
+            if exc.__cause__ is not None:
+                print(f"  {exc.__cause__}", file=sys.stderr)
+            return 1
     print("Frequency baseline: OK")
     print(f"Training gold occurrences: {train_occurrences:,}")
     print(f"Distinct train candidate keys: {distinct_keys:,}")
