@@ -459,11 +459,11 @@ def test_cli_build_instances_compact_output(tmp_path):
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 def test_failed_integrity_check_writes_no_split_csv(tmp_path, monkeypatch, capsys):
-    import cli as cli_pkg
+    import commands.make_splits as splits_pkg
 
     checkout = _tagged_checkout(tmp_path)
     out_dir = tmp_path / "derived"
-    real_assign = cli_pkg.assign_texts
+    real_assign = splits_pkg.assign_texts
 
     def conflicting_assign(lang_weights):
         result = real_assign(lang_weights)
@@ -475,8 +475,8 @@ def test_failed_integrity_check_writes_no_split_csv(tmp_path, monkeypatch, capsy
             for part in SPLIT_NAMES
         }
 
-    monkeypatch.setattr(cli_pkg, "assign_texts", conflicting_assign)
-    status = cli_pkg._run_make_splits(
+    monkeypatch.setattr(splits_pkg, "assign_texts", conflicting_assign)
+    status = splits_pkg._run_make_splits(
         argparse.Namespace(data_dir=checkout, output_dir=out_dir)
     )
     captured = capsys.readouterr()

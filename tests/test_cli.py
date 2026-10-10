@@ -3268,6 +3268,63 @@ def test_fetch_inspect_command_imports_without_cli_or_preparation(module_name):
     assert result.stderr == ""
 
 
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "commands.build_instances",
+        "commands.make_splits",
+    ],
+)
+def test_build_make_command_imports_without_cli_or_preparation(module_name):
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(SRC)!r})\n"
+        "import core.data as data\n"
+        "import core.instances as instances\n"
+        "import core.splits as splits\n"
+        "import commands.benchmark_reports as reports\n"
+        "\n"
+        "def fail(*args, **kwargs):\n"
+        "    raise AssertionError('dependency called during import')\n"
+        "\n"
+        "data.read_corpus_tables = fail\n"
+        "data.require_local_corpus = fail\n"
+        "data.resolve_data_dir = fail\n"
+        "instances.build_language_instances = fail\n"
+        "instances.determine_data_tag = fail\n"
+        "instances.build_review_rows = fail\n"
+        "instances.review_csv_path = fail\n"
+        "instances.write_review_csv = fail\n"
+        "splits.compute_text_weights = fail\n"
+        "splits.assign_texts = fail\n"
+        "splits.validate_split_assignments = fail\n"
+        "splits.build_split_rows = fail\n"
+        "splits.split_csv_bytes = fail\n"
+        "splits.split_csv_path = fail\n"
+        "splits.write_split_csv = fail\n"
+        "splits.split_overlap_counts = fail\n"
+        "reports._language_counts = fail\n"
+        "reports._print_build_summary = fail\n"
+        "reports._print_benchmark_table = fail\n"
+        "reports._split_stats = fail\n"
+        "reports._print_split_table = fail\n"
+        "reports._print_split_report = fail\n"
+        "\n"
+        f"import {module_name}\n"
+        "\n"
+        "assert 'cli' not in sys.modules, 'cli must not be imported'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
 def test_read_split_rows_empty_split_reports_unexpected_header(tmp_path):
     import benchmark_context
     from core.splits import SplitError
