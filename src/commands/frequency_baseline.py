@@ -193,6 +193,8 @@ def _run_frequency_baseline(args: argparse.Namespace) -> int:
         if temp_path is not None and not published:
             try:
                 temp_path.unlink()
+            except FileNotFoundError:
+                pass
             except OSError as cleanup_error:
                 print(
                     "error: could not remove the temporary frequency baseline "
