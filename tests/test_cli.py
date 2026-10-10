@@ -119,12 +119,13 @@ def test_missing_custom_data_dir_fails_all_three(tmp_path, args):
 def test_missing_default_checkout_offers_fetch_command(tmp_path, monkeypatch, capsys, args):
     monkeypatch.syspath_prepend(str(SRC))
     import cli
+    import commands.inspect_data as inspect_pkg
     import core.data as data
 
     missing = tmp_path / "missing-default-checkout"
 
     monkeypatch.setattr(data, "DEFAULT_DATA_DIR", missing)
-    monkeypatch.setattr(cli, "DEFAULT_DATA_DIR", missing)
+    monkeypatch.setattr(inspect_pkg, "DEFAULT_DATA_DIR", missing)
 
     try:
         status = cli.main(list(args))
@@ -150,6 +151,56 @@ def test_incomplete_checkout_reports_missing_csv(tmp_path):
     assert "texts_krl.csv.zst" in result.stderr
     assert "no corpus" not in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_fetch_data_downloaded_success(tmp_path, monkeypatch, capsys):
+    import commands.fetch_data as fetch_pkg
+    import cli
+
+    def fake_fetch(tag):
+        return True
+
+    monkeypatch.setattr(fetch_pkg, "fetch_data", fake_fetch)
+    status = cli.main(["fetch-data", "v2026.09"])
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == (
+        "Downloaded: dictorpus-data (v2026.09) in data/dictorpus-data/\n"
+    )
+    assert captured.err == ""
+
+
+def test_fetch_data_already_present_success(tmp_path, monkeypatch, capsys):
+    import commands.fetch_data as fetch_pkg
+    import cli
+
+    def fake_fetch(tag):
+        return False
+
+    monkeypatch.setattr(fetch_pkg, "fetch_data", fake_fetch)
+    status = cli.main(["fetch-data", "v2026.09"])
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == (
+        "Already present: dictorpus-data (v2026.09) in data/dictorpus-data/\n"
+    )
+    assert captured.err == ""
+
+
+def test_fetch_data_fetch_error_exits_one(tmp_path, monkeypatch, capsys):
+    import commands.fetch_data as fetch_pkg
+    import cli
+
+    def failing_fetch(tag):
+        raise fetch_pkg.FetchError("boom")
+
+    monkeypatch.setattr(fetch_pkg, "fetch_data", failing_fetch)
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["fetch-data", "v2026.09"])
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: boom\n"
 
 
 def _strict_instances(data_dir: Path):
@@ -3156,6 +3207,53 @@ def test_frequency_baseline_command_imports_without_cli_or_preparation():
         "reports._print_validation_failure = fail\n"
         "\n"
         "import commands.frequency_baseline\n"
+        "\n"
+        "assert 'cli' not in sys.modules, 'cli must not be imported'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "commands.fetch_data",
+        "commands.inspect_data",
+    ],
+)
+def test_fetch_inspect_command_imports_without_cli_or_preparation(module_name):
+    if module_name == "commands.fetch_data":
+        guards = (
+            "import core.fetch as fetch\n"
+            "\n"
+            "fetch.fetch_data = fail\n"
+        )
+    else:
+        guards = (
+            "import core.data as data\n"
+            "import core.validation as validation\n"
+            "\n"
+            "data.require_local_corpus = fail\n"
+            "data.read_corpus_tables = fail\n"
+            "validation.inspect_corpus = fail\n"
+        )
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(SRC)!r})\n"
+        "\n"
+        "def fail(*args, **kwargs):\n"
+        "    raise AssertionError('dependency called during import')\n"
+        "\n"
+        + guards
+        + "\n"
+        f"import {module_name}\n"
         "\n"
         "assert 'cli' not in sys.modules, 'cli must not be imported'\n"
     )
