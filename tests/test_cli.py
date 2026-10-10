@@ -1651,6 +1651,115 @@ def test_fractional_scores_validate_and_evaluate_hand_calculated(
     assert {path.name for path in tmp_path.iterdir()} == before_files
 
 
+def _stub_evaluation_preparation(monkeypatch, evaluate_pkg, instances):
+    monkeypatch.setattr(evaluate_pkg, "resolve_data_dir", lambda data_dir: data_dir)
+    monkeypatch.setattr(
+        evaluate_pkg, "require_local_corpus", lambda data_dir: data_dir
+    )
+    monkeypatch.setattr(
+        evaluate_pkg, "determine_data_tag", lambda data_dir: "fixture-tag"
+    )
+    monkeypatch.setattr(
+        evaluate_pkg, "read_corpus_tables", lambda lang, data_dir: object()
+    )
+    monkeypatch.setattr(
+        evaluate_pkg,
+        "build_language_instances",
+        lambda lang, tables: (
+            SimpleNamespace(instances=instances)
+            if lang == "krl"
+            else SimpleNamespace(instances=())
+        ),
+    )
+
+
+def test_evaluate_invalid_utf8_during_validation_reports_decode_error(
+    tmp_path, monkeypatch, capsys
+):
+    import commands.evaluate_predictions as evaluate_pkg
+
+    _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
+    predictions.write_bytes(b"word_id,wordform_id,gramset,rank,score\n1,10,\xff,1,0\n")
+    split_file = tmp_path / "splits_dev.csv"
+    split_file.write_text("language,text_id,split\nkrl,1,dev\n", encoding="utf-8")
+
+    def fail_load(path):
+        pytest.fail("load_ranked_predictions must not be called")
+
+    def fail_metrics(*args, **kwargs):
+        pytest.fail("compute_ranking_metrics must not be called")
+
+    monkeypatch.setattr(evaluate_pkg, "load_ranked_predictions", fail_load)
+    monkeypatch.setattr(evaluate_pkg, "compute_ranking_metrics", fail_metrics)
+    _stub_evaluation_preparation(monkeypatch, evaluate_pkg, instances)
+
+    before_bytes = predictions.read_bytes()
+    before_files = {path.name for path in tmp_path.iterdir()}
+    status = evaluate_pkg.run_evaluate_predictions(
+        argparse.Namespace(
+            predictions=predictions,
+            split="dev",
+            data_dir=tmp_path,
+            split_file=split_file,
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "error: cannot decode predictions file as UTF-8:" in captured.err
+    assert str(predictions) in captured.err
+    assert "invalid start byte" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Prediction evaluation: OK" not in captured.out
+    assert "Top-1 accuracy" not in captured.out
+    assert "MRR" not in captured.out
+    assert "Top-3 accuracy" not in captured.out
+    assert predictions.read_bytes() == before_bytes
+    assert {path.name for path in tmp_path.iterdir()} == before_files
+
+
+def test_evaluate_reread_unicode_decode_failure_reports(
+    tmp_path, monkeypatch, capsys
+):
+    import commands.evaluate_predictions as evaluate_pkg
+
+    _, instances, split_rows, _, predictions = _tiny_dev_fixture(tmp_path)
+    split_file = tmp_path / "splits_dev.csv"
+    split_file.write_text("language,text_id,split\nkrl,1,dev\n", encoding="utf-8")
+
+    def fail_reread(path):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    def fail_metrics(*args, **kwargs):
+        pytest.fail("compute_ranking_metrics must not be called")
+
+    monkeypatch.setattr(evaluate_pkg, "load_ranked_predictions", fail_reread)
+    monkeypatch.setattr(evaluate_pkg, "compute_ranking_metrics", fail_metrics)
+    _stub_evaluation_preparation(monkeypatch, evaluate_pkg, instances)
+
+    before_bytes = predictions.read_bytes()
+    before_files = {path.name for path in tmp_path.iterdir()}
+    status = evaluate_pkg.run_evaluate_predictions(
+        argparse.Namespace(
+            predictions=predictions,
+            split="dev",
+            data_dir=tmp_path,
+            split_file=split_file,
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "error: cannot decode predictions file as UTF-8:" in captured.err
+    assert str(predictions) in captured.err
+    assert "invalid start byte" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Prediction evaluation: OK" not in captured.out
+    assert "Top-1 accuracy" not in captured.out
+    assert "MRR" not in captured.out
+    assert "Top-3 accuracy" not in captured.out
+    assert predictions.read_bytes() == before_bytes
+    assert {path.name for path in tmp_path.iterdir()} == before_files
+
+
 def _text_keys(instances) -> list[tuple[str, int]]:
     return sorted({(inst.language, int(inst.text_id)) for inst in instances})
 
@@ -2117,6 +2226,151 @@ def test_frequency_baseline_cleanup_failure_reports_published_csv(
     header, raw = _read_generated(output)
     assert header == ["word_id", "wordform_id", "gramset", "rank", "score"]
     assert raw == _expected_frequency_rows(baseline)
+    real_unlink(temps[0])
+
+
+@pytest.mark.parametrize("retry_first", [False, True])
+def test_frequency_baseline_temp_name_disappears_after_publication(
+    tmp_path, monkeypatch, capsys, retry_first
+):
+    import commands.frequency_baseline as freq_pkg
+
+    _, instances, split_rows, baseline, _ = _tiny_dev_fixture(tmp_path)
+    _stub_frequency_preflight(monkeypatch, freq_pkg, instances, split_rows)
+    output = tmp_path / "frequency-dev.csv"
+    attempts = {"count": 0}
+
+    def disappearing_removal(self, real_unlink):
+        attempts["count"] += 1
+        if retry_first and attempts["count"] == 1:
+            raise PermissionError("transient failure")
+        real_unlink(self)
+        raise FileNotFoundError("temporary name disappeared")
+
+    _patch_frequency_unlink(monkeypatch, disappearing_removal)
+    status = freq_pkg._run_frequency_baseline(
+        argparse.Namespace(
+            split="dev",
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert attempts["count"] == (2 if retry_first else 1)
+    assert status == 0, captured.err
+    assert captured.err == ""
+    assert "Frequency baseline: OK" in captured.out
+    assert "Validation: OK" in captured.out
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    header, raw = _read_generated(output)
+    assert header == ["word_id", "wordform_id", "gramset", "rank", "score"]
+    assert raw == _expected_frequency_rows(baseline)
+    assert "Traceback" not in captured.err
+
+
+def test_frequency_baseline_partial_write_failure_reports(tmp_path, monkeypatch, capsys):
+    import commands.frequency_baseline as freq_pkg
+
+    _, instances, split_rows, baseline, _ = _tiny_dev_fixture(tmp_path)
+    _stub_frequency_preflight(monkeypatch, freq_pkg, instances, split_rows)
+    output = tmp_path / "frequency-dev.csv"
+    captured_bytes = {}
+    real_writer = csv.writer
+
+    class _PartialWriteWriter:
+        def __init__(self, stream):
+            self._stream = stream
+            self._writer = real_writer(stream)
+            self._rows = 0
+
+        def writerow(self, row):
+            self._writer.writerow(row)
+            if self._rows == 1:
+                self._stream.flush()
+                captured_bytes["value"] = Path(self._stream.name).read_bytes()
+                raise OSError("partial frequency write failed")
+            self._rows += 1
+
+        def writerows(self, rows):
+            for row in rows:
+                self.writerow(row)
+
+    def guarded_writer(stream, *args, **kwargs):
+        name = Path(stream.name).name
+        if name.startswith(".vepkar-frequency-") and name.endswith(".tmp"):
+            return _PartialWriteWriter(stream)
+        return real_writer(stream, *args, **kwargs)
+
+    monkeypatch.setattr(freq_pkg.csv, "writer", guarded_writer)
+    status = freq_pkg._run_frequency_baseline(
+        argparse.Namespace(
+            split="dev",
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    expected = _expected_frequency_rows(baseline)
+    lines = captured_bytes["value"].decode("utf-8").splitlines()
+    parsed = list(csv.reader(lines, strict=True))
+    assert parsed[0] == ["word_id", "wordform_id", "gramset", "rank", "score"]
+    assert parsed[1] == expected[0]
+    assert len(parsed) == 2
+    assert status == 1
+    assert "could not write the temporary frequency baseline CSV" in captured.err
+    assert "partial frequency write failed" in captured.err
+    assert not output.exists()
+    assert not list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    assert "Frequency baseline: OK" not in captured.out
+    assert "Validation: OK" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_frequency_baseline_publication_and_prepublication_cleanup_failure(
+    tmp_path, monkeypatch, capsys
+):
+    import commands.frequency_baseline as freq_pkg
+
+    _, instances, split_rows, _, _ = _tiny_dev_fixture(tmp_path)
+    _stub_frequency_preflight(monkeypatch, freq_pkg, instances, split_rows)
+    output = tmp_path / "frequency-dev.csv"
+
+    def failing_link(src, dst):
+        raise OSError("publication denied")
+
+    monkeypatch.setattr(freq_pkg.os, "link", failing_link)
+
+    def deny_cleanup(self, real_unlink):
+        raise PermissionError("prepublication cleanup denied")
+
+    real_unlink = _patch_frequency_unlink(monkeypatch, deny_cleanup)
+    status = freq_pkg._run_frequency_baseline(
+        argparse.Namespace(
+            split="dev",
+            output=output,
+            data_dir=tmp_path,
+            split_file=tmp_path / "splits_dev.csv",
+        )
+    )
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "could not publish the frequency baseline CSV" in captured.err
+    assert "publication denied" in captured.err
+    assert (
+        "could not remove the temporary frequency baseline file during cleanup"
+        in captured.err
+    )
+    assert "prepublication cleanup denied" in captured.err
+    assert "Frequency baseline CSV published, but temporary cleanup failed" not in captured.err
+    assert "Frequency baseline: OK" not in captured.out
+    assert "Validation: OK" not in captured.out
+    assert not output.exists()
+    temps = list(tmp_path.glob(".vepkar-frequency-*.tmp"))
+    assert len(temps) == 1
+    assert str(temps[0]) in captured.err
+    assert "Traceback" not in captured.err
     real_unlink(temps[0])
 
 

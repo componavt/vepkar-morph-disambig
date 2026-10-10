@@ -172,6 +172,11 @@ def run_evaluate_predictions(args: argparse.Namespace) -> int:
         if exc.__cause__ is not None:
             print(exc.__cause__, file=sys.stderr)
         return 1
+    except UnicodeDecodeError as exc:
+        print("error: cannot decode predictions file as UTF-8:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
     except BenchmarkIntegrityError as exc:
         print(
             "error: strict benchmark is internally inconsistent",
@@ -188,6 +193,11 @@ def run_evaluate_predictions(args: argparse.Namespace) -> int:
         prediction_rows = load_ranked_predictions(args.predictions)
     except (PredictionFileReadError, PredictionCsvParseError) as exc:
         print("error: cannot load predictions for evaluation:", file=sys.stderr)
+        print(f"  {args.predictions}", file=sys.stderr)
+        print(f"  {exc}", file=sys.stderr)
+        return 1
+    except UnicodeDecodeError as exc:
+        print("error: cannot decode predictions file as UTF-8:", file=sys.stderr)
         print(f"  {args.predictions}", file=sys.stderr)
         print(f"  {exc}", file=sys.stderr)
         return 1
