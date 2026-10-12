@@ -10,7 +10,8 @@ The repository covers three research directions:
 - `src/t2_context/` — contextual models;
 - `src/t3_transfer/` — transfer learning between language varieties;
 
-Shared code is in `src/core/`.
+Shared algorithms are in `src/core/`, and command handlers are in
+`src/commands/`. The command-line entry point is `src/cli.py`.
 
 ## Set up the environment
 
@@ -39,27 +40,22 @@ python src/cli.py build-instances
 python src/cli.py make-splits
 ```
 
-Language codes: `vep` — Vepsian, `krl` — Karelian Proper,
-`olo` — Livvi Karelian, `lud` — Ludic Karelian.
+Language codes: `vep` — the Veps language; `krl`, `olo`, and `lud` —
+the Karelian Proper, Livvi, and Ludic dialects of the Karelian language,
+respectively.
 
 The generated split is described in
 [data/derived/README.md](data/derived/README.md).
 
 ## Evaluation
 
-The repository includes a frequency baseline: it ranks the candidate
-analyses of each word occurrence by the frequency of expert analyses
-in the training split. Quality is evaluated separately on the `dev`
-and `test` splits.
-
-[Evaluation workflow and metrics](docs/evaluation.md).  
-[Frequency baseline results](docs/frequency_baseline.md).
-
-## Quality evaluation
-
 A frequency baseline is implemented: candidates are ranked by the frequency
 of expert analyses in the training split. Quality is evaluated separately
 on `dev` and `test`.
 
-[How to run and compute metrics](docs/evaluation.md).
+Diagnostics for the frequency baseline are available on `dev`:
+comparison with expert answers, a per-occurrence CSV table,
+and a compact numerical summary.
+
+[Evaluation workflow and metrics](docs/evaluation.md).
 [Frequency baseline results](docs/frequency_baseline.md).

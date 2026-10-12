@@ -2,8 +2,8 @@
 
 # Evaluation
 
-This document describes how to create, validate, and evaluate a
-predictions file for the `dev` or `test` split.
+This document describes how to create, validate, and evaluate predictions
+for `dev` or `test`, and how to diagnose the frequency baseline on `dev`.
 
 ## Before you start
 
@@ -74,6 +74,47 @@ one selected by the expert; no new candidates are created.
 The metrics are displayed as proportions from 0 to 1 with four decimal
 places. Only the displayed values are rounded; the underlying
 calculations remain unrounded.
+
+## Frequency baseline diagnostics
+
+After generating predictions for `dev`, run:
+
+```bash
+python src/cli.py diagnose-frequency-baseline \
+  --predictions /tmp/vepkar-frequency-dev-v2.csv \
+  --output /tmp/vepkar-frequency-dev-diagnostics.csv
+```
+
+The command works only with `dev`. It validates the predictions
+and confirms that candidate identities, ranks, and scores match
+the frequency baseline for the same data and split.
+
+The input must be an uncompressed predictions CSV. Decompress a
+`.csv.zst` archive beforehand. The output directory must exist;
+an existing file or symbolic link is not replaced.
+
+The diagnostic CSV contains one row per evaluated word occurrence,
+including correct predictions:
+
+```csv
+language,word_id,word,candidate_count,gold_wordform_id,gold_gramset,top1_wordform_id,top1_gramset,gold_rank,gold_train_frequency,top1_train_frequency
+```
+
+`word` is copied from the normalized corpus field.
+`gold_*` describes the expert-selected candidate; `top1_*` describes
+the top-ranked candidate. `gold_rank = 1` means a correct Top-1 prediction.
+Candidates are compared by the exact `(wordform_id, gramset)` pair.
+
+Frequencies count expert selections of this pair in `train`,
+not occurrences of the word's spelling in the corpus.
+
+After saving the CSV, the command prints overall statistics,
+the distribution of the expert candidate's rank, zero-frequency
+and tie statistics, and tables by subcorpus and candidate count.
+Ratios with a zero denominator are displayed as `N/A`.
+
+The diagnostic table is not a predictions file:
+it contains expert information and is intended for error analysis.
 
 ## Comparing methods
 

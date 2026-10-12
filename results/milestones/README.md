@@ -19,6 +19,10 @@ word-occurrence and candidate-row counts, and metrics for `test`.
 `test.csv.zst` is the accepted final evaluation result.
 `dev.csv.zst` is saved when needed for diagnostics and is optional.
 
+A derived diagnostic table, such as `dev-diagnostics.csv.zst`,
+may be stored alongside the predictions. It does not replace them;
+its purpose and source are documented in the result README.
+
 Result directory names follow this pattern:
 
 ```text
