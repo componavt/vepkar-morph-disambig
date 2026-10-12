@@ -33,8 +33,9 @@ XML of the same sentence:
 ```
 
 The sentence with `sentence_id=10` is included in the queue because one
-of its word records has `word_number=0`. Its `word_id` and the `id`
-attribute of the `<w>` element are both positive.
+of its word records has `word_number=0`. The word record for “cat”
+has a positive `word_id`, and its `<w>` element has a positive `id`
+attribute.
 
 `word_number` is the word position in the corpus table, whereas the `id`
 attribute of `<w>` is its XML identifier. Queue membership is determined
