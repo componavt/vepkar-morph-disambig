@@ -125,38 +125,32 @@ class TestHandBuiltCase:
 
 
 class TestGramsetElements:
-    def test_repeated_elements_single_key(self):
+    @pytest.mark.parametrize(
+        ("gramset", "expected_elements"),
+        [
+            ("", {""}),
+            ("SG++GEN", {"SG", "", "GEN"}),
+            ("SG+SG", {"SG"}),
+            ("PFV.PTCP+SG", {"PFV.PTCP", "SG"}),
+        ],
+    )
+    def test_element_set_from_split(self, gramset, expected_elements):
         actual = _build_features(
             language="en",
-            gramset="SG+SG+PL",
+            gramset=gramset,
             word="cat",
             left_word="a",
             right_word="b",
         )
-        element_keys = [k for k in actual if k.startswith('["element",')]
-        assert element_keys == ['["element","PL"]', '["element","SG"]']
-
-    def test_dotted_elements_unchanged(self):
-        actual = _build_features(
-            language="en",
-            gramset="N.M.SG+NOM",
-            word="cat",
-            left_word="a",
-            right_word="b",
-        )
-        assert '["element","N.M.SG"]' in actual
-        assert '["element","NOM"]' in actual
-
-    def test_empty_gramset(self):
-        actual = _build_features(
-            language="en",
-            gramset="",
-            word="cat",
-            left_word="a",
-            right_word="b",
-        )
-        assert "[\"element\"]" not in actual
-        assert '["gramset",""]' in actual
+        decoded = {tuple(json.loads(key)) for key in actual}
+        assert {parts for parts in decoded if parts[0] == "element"} == {
+            ("element", element) for element in expected_elements
+        }
+        assert ("gramset", gramset) in decoded
+        for key in actual:
+            parts = json.loads(key)
+            if parts[0] == "element":
+                assert type(actual[key]) is float and actual[key] == 1.0
 
 
 class TestSuffixes:
@@ -207,7 +201,7 @@ class TestSuffixes:
         )
         assert not [k for k in actual if '"suffix_gramset"' in k]
 
-    def test_unicode_word_four_character_limit(self):
+    def test_four_character_word_limit(self):
         actual = _build_features(
             language="fi",
             gramset="SG",
@@ -223,53 +217,110 @@ class TestSuffixes:
             '["suffix_gramset","SG","4","issa"]',
         ]
 
-    def test_unicode_characters_preserved(self):
+    @pytest.mark.parametrize(
+        ("word", "expected"),
+        [
+            (
+                "häntä",
+                {
+                    ("suffix_gramset", "SG", "1", "ä"),
+                    ("suffix_gramset", "SG", "2", "tä"),
+                    ("suffix_gramset", "SG", "3", "ntä"),
+                    ("suffix_gramset", "SG", "4", "äntä"),
+                },
+            ),
+            (
+                "a\u0308",
+                {
+                    ("suffix_gramset", "SG", "1", "\u0308"),
+                    ("suffix_gramset", "SG", "2", "a\u0308"),
+                },
+            ),
+        ],
+    )
+    def test_unicode_characters_preserved(self, word, expected):
         actual = _build_features(
             language="fi",
             gramset="SG",
-            word="häntä",
+            word=word,
             left_word="a",
             right_word="b",
         )
-        assert '["suffix_gramset","SG","0"]' not in actual
-        assert any("hä" in k or "ntä" in k for k in actual if '"suffix_gramset"' in k)
+        suffix_keys = set()
+        for key in actual:
+            parts = json.loads(key)
+            if parts[0] == "suffix_gramset":
+                suffix_keys.add(tuple(parts))
+        assert suffix_keys == expected
 
 
 class TestJsonRoundTripping:
     @pytest.mark.parametrize(
-        ("gramset", "word", "left_word", "right_word"),
+        ("language", "gramset", "word", "left_word", "right_word"),
         [
-            ('A"B', 'C"D', 'E"F', 'G"H'),
-            ("A\\B", "C\\D", "E\\F", "G\\H"),
-            ('A,B', "C:D", "E;F", 'G"'),
-            ('"', "\\", ",", ":"),
-            ('A"B,C\\D', 'E"F,', 'G\\H,', 'I:J'),
+            ("l1", 'A"B', 'C"D', 'E"F', 'G"H'),
+            ("l2", "A\\B", "C\\D", "E\\F", "G\\H"),
+            ("l3", 'A,B', "C:D", "E;F", 'G"'),
+            ("l4", '"', "\\", ",", ":"),
+            ("l5", 'A"B,C\\D', 'E"F,', 'G\\H,', 'I:J'),
+            ("  MiXeD  ", "  SG +Nom ", "  Cat ", "  LEFT ", "  RIGHT "),
         ],
     )
-    def test_round_trip_keys(self, gramset, word, left_word, right_word):
+    def test_round_trip_keys(self, language, gramset, word, left_word, right_word):
         actual = _build_features(
-            language="l",
+            language=language,
             gramset=gramset,
             word=word,
             left_word=left_word,
             right_word=right_word,
         )
+        decoded = {tuple(json.loads(key)) for key in actual}
+        assert ("language", language) in decoded
+        assert ("gramset", gramset) in decoded
+        assert ("language_gramset", language, gramset) in decoded
+        assert ("left_gramset", gramset, left_word) in decoded
+        assert ("right_gramset", gramset, right_word) in decoded
+        assert {("element", element) for element in gramset.split("+")} == {
+            parts for parts in decoded if parts[0] == "element"
+        }
+        assert {
+            ("suffix_gramset", gramset, str(n), word[-n:])
+            for n in range(1, min(4, len(word)) + 1)
+        } == {parts for parts in decoded if parts[0] == "suffix_gramset"}
         for key in actual:
             parts = json.loads(key)
             assert isinstance(parts, list)
             assert all(isinstance(p, str) for p in parts)
             assert json.dumps(parts, ensure_ascii=False, separators=(",", ":")) == key
 
-    def test_repr_values_are_distinct(self):
-        actual = _build_features(
-            language="en",
-            gramset="SG",
+    def test_structural_collision_distinguished(self):
+        first = _build_features(
+            language="a",
+            gramset="b,c",
             word="cat",
             left_word="a",
             right_word="b",
         )
-        keys = list(actual)
-        assert len(keys) == len(set(keys))
+        second = _build_features(
+            language="a,b",
+            gramset="c",
+            word="cat",
+            left_word="a",
+            right_word="b",
+        )
+        first_keys = [
+            key for key in first if json.loads(key)[0] == "language_gramset"
+        ]
+        second_keys = [
+            key for key in second if json.loads(key)[0] == "language_gramset"
+        ]
+        assert len(first_keys) == 1
+        assert len(second_keys) == 1
+        first_key = first_keys[0]
+        second_key = second_keys[0]
+        assert json.loads(first_key) == ["language_gramset", "a", "b,c"]
+        assert json.loads(second_key) == ["language_gramset", "a,b", "c"]
+        assert first_key != second_key
 
 
 class TestFeatureForms:
@@ -281,11 +332,22 @@ class TestFeatureForms:
             left_word="<BOS>",
             right_word="<EOS>",
         )
-        allowed_prefixes = ("element", "gramset", "language", "language_gramset",
-                            "suffix_gramset", "left_gramset", "right_gramset")
+        expected_sizes = {
+            "gramset": 2,
+            "element": 2,
+            "language": 2,
+            "language_gramset": 3,
+            "suffix_gramset": 4,
+            "left_gramset": 3,
+            "right_gramset": 3,
+        }
         for key in actual:
             parts = json.loads(key)
-            assert parts[0] in allowed_prefixes
+            assert isinstance(parts, list)
+            assert parts
+            assert all(isinstance(p, str) for p in parts)
+            assert parts[0] in expected_sizes
+            assert len(parts) == expected_sizes[parts[0]]
 
     @pytest.mark.parametrize(
         "parts",
@@ -335,7 +397,8 @@ class TestValuesAndOrder:
             left_word="a",
             right_word="b",
         )
-        assert set(actual.values()) == {1.0}
+        assert actual
+        assert all(type(v) is float and v == 1.0 for v in actual.values())
 
     def test_sorted_key_order(self):
         actual = _build_features(
@@ -383,10 +446,17 @@ class TestValuesAndOrder:
             left_word="<BOS>",
             right_word="<EOS>",
         )
-        joined = "".join(actual)
-        assert "word_length" not in joined
-        assert "length" not in json.dumps([json.loads(k) for k in actual], ensure_ascii=False)
-        parsed = [json.loads(k) for k in actual]
-        for parts in parsed:
-            assert parts[0] in ("gramset", "element", "language", "language_gramset", "suffix_gramset", "left_gramset", "right_gramset")
-            assert len(parts) <= 4
+        expected_sizes = {
+            "gramset": 2,
+            "element": 2,
+            "language": 2,
+            "language_gramset": 3,
+            "suffix_gramset": 4,
+            "left_gramset": 3,
+            "right_gramset": 3,
+        }
+        for key in actual:
+            parts = json.loads(key)
+            assert isinstance(parts, list)
+            assert parts[0] in expected_sizes
+            assert len(parts) == expected_sizes[parts[0]]
