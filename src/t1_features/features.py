@@ -1,5 +1,8 @@
 import json
 from dataclasses import dataclass
+from typing import Iterable
+
+from core.instances import Instance
 
 
 class FeatureConstructionError(ValueError):
@@ -28,6 +31,87 @@ class CandidateExample:
     features: dict[str, float]
     label: int | None
     sample_weight: float | None
+
+
+def _resolve_context(
+    instances: Iterable[Instance],
+    context_words: Iterable[ContextWord],
+) -> dict[tuple[str, int], tuple[str, str]]:
+    materialized_instances = list(instances)
+    if not materialized_instances:
+        return {}
+
+    needed_sentences: set[tuple[str, int]] = set()
+    instances_by_sentence: dict[tuple[str, int], list[Instance]] = {}
+    for instance in materialized_instances:
+        sentence_key = (instance.language, instance.sentence_id)
+        needed_sentences.add(sentence_key)
+        instances_by_sentence.setdefault(sentence_key, []).append(instance)
+
+    records_by_sentence: dict[tuple[str, int], list[ContextWord]] = {}
+    for record in context_words:
+        sentence_key = (record.language, record.sentence_id)
+        if sentence_key in needed_sentences:
+            records_by_sentence.setdefault(sentence_key, []).append(record)
+
+    resolved: dict[tuple[str, int], tuple[str, str]] = {}
+    for sentence_key, targets in instances_by_sentence.items():
+        language, sentence_id = sentence_key
+        records = records_by_sentence.get(sentence_key, [])
+        affected = targets[0]
+
+        for record in records:
+            if record.word_number <= 0:
+                raise FeatureConstructionError(
+                    f"{language}: sentence {sentence_id}, target word {affected.word_id}: "
+                    f"nonpositive word_number {record.word_number} for word {record.word_id} in sentence"
+                )
+
+        numbers = [record.word_number for record in records]
+        if len(numbers) != len(set(numbers)):
+            duplicate = next(number for number in numbers if numbers.count(number) > 1)
+            raise FeatureConstructionError(
+                f"{language}: sentence {sentence_id}, target word {affected.word_id}: "
+                f"duplicate word_number {duplicate} in sentence"
+            )
+
+        records.sort(key=lambda record: record.word_number)
+
+        records_by_id: dict[int, list[ContextWord]] = {}
+        position_index: dict[int, int] = {}
+        for index, record in enumerate(records):
+            records_by_id.setdefault(record.word_id, []).append(record)
+            position_index[record.word_number] = index
+
+        for target in targets:
+            matches = records_by_id.get(target.word_id, [])
+            if not matches:
+                raise FeatureConstructionError(
+                    f"{language}: sentence {sentence_id}, target word {target.word_id}: "
+                    "target word missing from sentence context"
+                )
+            if len(matches) > 1:
+                raise FeatureConstructionError(
+                    f"{language}: sentence {sentence_id}, target word {target.word_id}: "
+                    f"expected exactly one context record, found {len(matches)}"
+                )
+            match = matches[0]
+            if match.word_number != target.word_number:
+                raise FeatureConstructionError(
+                    f"{language}: sentence {sentence_id}, target word {target.word_id}: "
+                    f"position mismatch, expected {target.word_number}, got {match.word_number}"
+                )
+            if match.word != target.word:
+                raise FeatureConstructionError(
+                    f"{language}: sentence {sentence_id}, target word {target.word_id}: "
+                    f"word mismatch, expected {target.word!r}, got {match.word!r}"
+                )
+            index = position_index[match.word_number]
+            left = records[index - 1].word if index > 0 else "<BOS>"
+            right = records[index + 1].word if index + 1 < len(records) else "<EOS>"
+            resolved[(language, target.word_id)] = (left, right)
+
+    return dict(sorted(resolved.items()))
 
 
 def _build_features(

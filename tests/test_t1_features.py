@@ -14,7 +14,9 @@ from t1_features.features import (  # noqa: E402
     ContextWord,
     FeatureConstructionError,
     _build_features,
+    _resolve_context,
 )
+from core.instances import Candidate, Instance  # noqa: E402
 
 
 class TestTypes:
@@ -460,3 +462,247 @@ class TestValuesAndOrder:
             assert isinstance(parts, list)
             assert parts[0] in expected_sizes
             assert len(parts) == expected_sizes[parts[0]]
+
+
+def make_instance(language, word_id, sentence_id, word_number, word):
+    return Instance(
+        language=language,
+        word_id=word_id,
+        sentence_id=sentence_id,
+        text_id=1,
+        word=word,
+        word_number=word_number,
+        sentence_xml="",
+        candidates=(Candidate(1, "SG"), Candidate(2, "PL")),
+        gold_analysis=Candidate(1, "SG"),
+    )
+
+
+def make_word(language, sentence_id, word_id, word_number, word):
+    return ContextWord(language, sentence_id, word_id, word_number, word)
+
+
+class TestResolveContext:
+    def test_ordinary_neighbors_absent_from_targets(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [
+            make_word("krl", 50, 901, 2, "A"),
+            make_word("krl", 50, 317, 5, "B"),
+            make_word("krl", 50, 840, 9, "C"),
+        ]
+        assert _resolve_context(instances, words) == {("krl", 317): ("A", "C")}
+
+    def test_boundaries_first_last_single_word(self):
+        instances = [
+            make_instance("krl", 100, 1, 1, "a"),
+            make_instance("krl", 200, 2, 2, "b"),
+            make_instance("krl", 300, 3, 1, "c"),
+        ]
+        words = [
+            make_word("krl", 1, 100, 1, "a"),
+            make_word("krl", 1, 101, 2, "x"),
+            make_word("krl", 2, 200, 2, "b"),
+            make_word("krl", 2, 201, 1, "y"),
+            make_word("krl", 3, 300, 1, "c"),
+        ]
+        result = _resolve_context(instances, words)
+        assert result[("krl", 100)] == ("<BOS>", "x")
+        assert result[("krl", 200)] == ("y", "<EOS>")
+        assert result[("krl", 300)] == ("<BOS>", "<EOS>")
+
+    def test_repeated_spellings_different_ids(self):
+        instances = [make_instance("krl", 2, 10, 2, "in")]
+        words = [
+            make_word("krl", 10, 1, 1, "in"),
+            make_word("krl", 10, 2, 2, "in"),
+            make_word("krl", 10, 3, 3, "in"),
+        ]
+        assert _resolve_context(instances, words) == {("krl", 2): ("in", "in")}
+
+    def test_nonconsecutive_positions_and_order_invariance(self):
+        instances = [
+            make_instance("krl", 901, 50, 2, "A"),
+            make_instance("krl", 317, 50, 5, "B"),
+            make_instance("krl", 840, 50, 9, "C"),
+        ]
+        words = [
+            make_word("krl", 50, 840, 9, "C"),
+            make_word("krl", 50, 317, 5, "B"),
+            make_word("krl", 50, 901, 2, "A"),
+            make_word("krl", 50, 55, 20, "D"),
+        ]
+        expected = {
+            ("krl", 901): ("<BOS>", "B"),
+            ("krl", 317): ("A", "C"),
+            ("krl", 840): ("B", "D"),
+        }
+        assert _resolve_context(instances, words) == expected
+        assert _resolve_context(list(reversed(instances)), list(reversed(words))) == expected
+        result = _resolve_context(instances, words)
+        assert list(result) == sorted(result)
+
+    def test_sentence_and_language_isolation(self):
+        instances = [
+            make_instance("krl", 7, 50, 1, "a"),
+            make_instance("vep", 7, 50, 2, "b"),
+        ]
+        words = [
+            make_word("krl", 50, 7, 1, "a"),
+            make_word("krl", 50, 8, 2, "x"),
+            make_word("vep", 50, 7, 2, "b"),
+            make_word("vep", 50, 6, 1, "y"),
+        ]
+        assert _resolve_context(instances, words) == {
+            ("krl", 7): ("<BOS>", "x"),
+            ("vep", 7): ("y", "<EOS>"),
+        }
+
+    def test_missing_target_id_in_other_sentence(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [
+            make_word("krl", 50, 901, 2, "A"),
+            make_word("krl", 50, 840, 9, "C"),
+            make_word("krl", 60, 317, 5, "B"),
+        ]
+        with pytest.raises(FeatureConstructionError) as exc:
+            _resolve_context(instances, words)
+        message = str(exc.value)
+        assert "krl" in message and "50" in message and "317" in message
+        assert "missing" in message.lower()
+
+    def test_unrelated_sentences_with_invalid_positions_and_duplicates_ignored(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [
+            make_word("krl", 50, 901, 2, "A"),
+            make_word("krl", 50, 317, 5, "B"),
+            make_word("krl", 50, 840, 9, "C"),
+            make_word("vep", 999, 1, 0, "bad"),
+            make_word("vep", 999, 2, 1, "dup1"),
+            make_word("vep", 999, 3, 1, "dup2"),
+            make_word("vep", 999, 4, 2, "dupid"),
+            make_word("vep", 999, 4, 3, "dupid"),
+        ]
+        assert _resolve_context(instances, words) == {("krl", 317): ("A", "C")}
+
+    def test_nonpositive_position_on_nontarget_word_in_needed_sentence(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [
+            make_word("krl", 50, 901, 0, "A"),
+            make_word("krl", 50, 317, 5, "B"),
+        ]
+        with pytest.raises(FeatureConstructionError) as exc:
+            _resolve_context(instances, words)
+        message = str(exc.value)
+        assert "krl" in message and "50" in message and "317" in message
+        assert "nonpositive" in message.lower()
+
+    def test_duplicate_position_on_nontarget_words_in_needed_sentence(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [
+            make_word("krl", 50, 901, 2, "A"),
+            make_word("krl", 50, 902, 2, "A2"),
+            make_word("krl", 50, 317, 5, "B"),
+        ]
+        with pytest.raises(FeatureConstructionError) as exc:
+            _resolve_context(instances, words)
+        message = str(exc.value)
+        assert "krl" in message and "50" in message and "317" in message
+        assert "duplicate" in message.lower()
+
+    def test_missing_target_error(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [make_word("krl", 50, 901, 2, "A")]
+        with pytest.raises(FeatureConstructionError) as exc:
+            _resolve_context(instances, words)
+        message = str(exc.value)
+        assert "krl" in message and "50" in message and "317" in message
+        assert "missing" in message.lower()
+
+    def test_multiple_records_with_target_id_error(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [
+            make_word("krl", 50, 317, 5, "B"),
+            make_word("krl", 50, 317, 6, "B2"),
+            make_word("krl", 50, 901, 2, "A"),
+        ]
+        with pytest.raises(FeatureConstructionError) as exc:
+            _resolve_context(instances, words)
+        message = str(exc.value)
+        assert "krl" in message and "50" in message and "317" in message
+        assert "exactly one" in message
+
+    def test_target_position_mismatch_error(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [make_word("krl", 50, 317, 6, "B")]
+        with pytest.raises(FeatureConstructionError) as exc:
+            _resolve_context(instances, words)
+        message = str(exc.value)
+        assert "krl" in message and "50" in message and "317" in message
+        assert "expected 5" in message and "got 6" in message
+
+    def test_target_word_string_mismatch_error(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [make_word("krl", 50, 317, 5, "b")]
+        with pytest.raises(FeatureConstructionError) as exc:
+            _resolve_context(instances, words)
+        message = str(exc.value)
+        assert "krl" in message and "50" in message and "317" in message
+        assert "expected 'B'" in message and "got 'b'" in message
+
+    def test_generator_inputs(self):
+        instances = (
+            make_instance(language, word_id, sentence_id, word_number, word)
+            for language, word_id, sentence_id, word_number, word in [
+                ("krl", 317, 50, 5, "B"),
+                ("vep", 700, 80, 3, "w"),
+            ]
+        )
+        words = (
+            make_word(language, sentence_id, word_id, word_number, word)
+            for language, sentence_id, word_id, word_number, word in [
+                ("krl", 50, 901, 2, "A"),
+                ("krl", 50, 317, 5, "B"),
+                ("krl", 50, 840, 9, "C"),
+                ("vep", 80, 700, 3, "w"),
+                ("vep", 80, 601, 2, "v"),
+                ("vep", 80, 750, 4, "x"),
+            ]
+        )
+        assert _resolve_context(instances, words) == {
+            ("krl", 317): ("A", "C"),
+            ("vep", 700): ("v", "x"),
+        }
+
+    def test_input_objects_and_order_unchanged(self):
+        instance_list = [
+            make_instance("krl", 317, 50, 5, "B"),
+            make_instance("krl", 901, 50, 2, "A"),
+        ]
+        word_list = [
+            make_word("krl", 50, 901, 2, "A"),
+            make_word("krl", 50, 840, 9, "C"),
+            make_word("krl", 50, 317, 5, "B"),
+        ]
+        original_instances = list(instance_list)
+        original_words = list(word_list)
+        _resolve_context(instance_list, word_list)
+        assert instance_list == original_instances
+        assert word_list == original_words
+
+    def test_empty_instances_skip_context(self):
+        def raising_context():
+            raise AssertionError("context_words must not be consumed")
+            yield  # pragma: no cover
+
+        assert _resolve_context([], raising_context()) == {}
+        assert _resolve_context(iter([]), raising_context()) == {}
+
+    def test_literal_preservation(self):
+        instances = [make_instance("krl", 2, 10, 2, " MiXeD ")]
+        words = [
+            make_word("krl", 10, 1, 1, "  a  "),
+            make_word("krl", 10, 2, 2, " MiXeD "),
+            make_word("krl", 10, 3, 3, "e\u0301\u0301"),
+        ]
+        result = _resolve_context(instances, words)
+        assert result[("krl", 2)] == ("  a  ", "e\u0301\u0301")
