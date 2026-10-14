@@ -1,6 +1,6 @@
 import json
 import sys
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -772,6 +772,18 @@ class NoGoldGuard:
         return getattr(self._instance, name)
 
 
+class AssemblyGuard:
+    _FORBIDDEN = frozenset({"sentence_xml", "text_id"})
+
+    def __init__(self, instance):
+        self._instance = instance
+
+    def __getattr__(self, name):
+        if name in self._FORBIDDEN:
+            raise AssertionError(f"forbidden attribute access: {name}")
+        return getattr(self._instance, name)
+
+
 def make_context_words(language, sentence_id, triples):
     return [make_word(language, sentence_id, word_id, number, word) for word_id, number, word in triples]
 
@@ -826,18 +838,50 @@ class TestBuildCandidateExamples:
         assert len(positives) == 1
 
     def test_two_field_gold_matching_shared_gramset_different_id(self):
-        instance = make_instance(
-            "krl", 1, 10, 2, "a",
-            candidates=(Candidate(1, "SG"), Candidate(2, "SG")),
-            gold_analysis=Candidate(2, "SG"),
-        )
-        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
-        examples = build_candidate_examples([instance], words, mode="train")
+        instances = [
+            make_instance(
+                "krl", 1, 10, 2, "a",
+                candidates=(Candidate(1, "SG"), Candidate(2, "SG")),
+                gold_analysis=Candidate(2, "SG"),
+            ),
+            make_instance(
+                "krl", 2, 20, 2, "b",
+                candidates=(Candidate(3, "SG"), Candidate(4, "PL"), Candidate(5, "PL")),
+                gold_analysis=Candidate(5, "PL"),
+            ),
+        ]
+        words = make_context_words(
+            "krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")]
+        ) + make_context_words("krl", 20, [(2, 2, "b"), (3, 1, "x"), (4, 3, "y")])
+        examples = build_candidate_examples(instances, words, mode="train")
         by_key = {(e.wordform_id, e.gramset): e for e in examples}
         assert by_key[(1, "SG")].label == 0
         assert by_key[(2, "SG")].label == 1
-        assert sum(e.sample_weight for e in examples) == pytest.approx(1.0)
-        positives = [e for e in examples if e.label == 1]
+        assert by_key[(3, "SG")].label == 0
+        assert by_key[(4, "PL")].label == 0
+        assert by_key[(5, "PL")].label == 1
+
+        grouped: dict[tuple[str, int], list[CandidateExample]] = {}
+        for example in examples:
+            grouped.setdefault((example.language, example.word_id), []).append(example)
+        assert set(grouped) == {("krl", 1), ("krl", 2)}
+
+        two_examples = grouped[("krl", 1)]
+        assert len(two_examples) == 2
+        assert [e.sample_weight for e in two_examples] == pytest.approx(
+            [1 / 2, 1 / 2]
+        )
+        assert sum(e.sample_weight for e in two_examples) == pytest.approx(1.0)
+        positives = [e for e in two_examples if e.label == 1]
+        assert len(positives) == 1
+
+        three_examples = grouped[("krl", 2)]
+        assert len(three_examples) == 3
+        assert [e.sample_weight for e in three_examples] == pytest.approx(
+            [1 / 3, 1 / 3, 1 / 3]
+        )
+        assert sum(e.sample_weight for e in three_examples) == pytest.approx(1.0)
+        positives = [e for e in three_examples if e.label == 1]
         assert len(positives) == 1
 
     def test_missing_gold_match_error(self):
@@ -909,6 +953,25 @@ class TestBuildCandidateExamples:
         assert len(examples) == 2
         assert all(e.label is None and e.sample_weight is None for e in examples)
 
+    def test_replacing_train_gold_changes_only_labels(self):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(2, "PL")),
+            gold_analysis=Candidate(1, "SG"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        first = build_candidate_examples([instance], words, mode="train")
+        second = build_candidate_examples(
+            [replace(instance, gold_analysis=Candidate(2, "PL"))],
+            words,
+            mode="train",
+        )
+        assert [e.label for e in first] == [1, 0]
+        assert [e.label for e in second] == [0, 1]
+        assert tuple(replace(e, label=None) for e in first) == tuple(
+            replace(e, label=None) for e in second
+        )
+
     def test_distinct_candidates_equal_features_and_isolated_dicts(self):
         instance = make_instance(
             "krl", 1, 10, 2, "a",
@@ -923,42 +986,63 @@ class TestBuildCandidateExamples:
         examples[0].features.clear()
         assert examples[1].features
 
-    def test_exact_tuple_ordering_after_permutations(self):
+    @pytest.mark.parametrize("mode", ["train", "predict"])
+    def test_exact_tuple_ordering_after_permutations(self, mode):
         base_instances = [
             make_instance("krl", 1, 10, 2, "a", candidates=(Candidate(1, "SG"), Candidate(2, "PL")), gold_analysis=Candidate(1, "SG")),
             make_instance("krl", 2, 20, 2, "b", candidates=(Candidate(3, "SG"), Candidate(4, "PL")), gold_analysis=Candidate(3, "SG")),
+            make_instance("krl", 5, 50, 2, "e", candidates=(Candidate(7, "SG"), Candidate(7, "PL")), gold_analysis=Candidate(7, "SG")),
             make_instance("vep", 3, 30, 2, "c", candidates=(Candidate(5, "SG"), Candidate(6, "PL")), gold_analysis=Candidate(5, "SG")),
         ]
         base_words = make_context_words(
             "krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")]
-        ) + make_context_words("krl", 20, [(2, 2, "b"), (3, 1, "x"), (4, 3, "y")]) + make_context_words("vep", 30, [(3, 2, "c"), (4, 1, "x"), (5, 3, "y")])
-        expected = build_candidate_examples(base_instances, base_words, mode="predict")
+        ) + make_context_words("krl", 20, [(2, 2, "b"), (3, 1, "x"), (4, 3, "y")]) + make_context_words("krl", 50, [(5, 2, "e"), (4, 1, "x"), (6, 3, "y")]) + make_context_words("vep", 30, [(3, 2, "c"), (4, 1, "x"), (5, 3, "y")])
+        expected = build_candidate_examples(base_instances, base_words, mode=mode)
         expected_keys = [
-            (e.language, e.word_id, e.wordform_id, e.gramset) for e in expected
+            ("krl", 1, 1, "SG"),
+            ("krl", 1, 2, "PL"),
+            ("krl", 2, 3, "SG"),
+            ("krl", 2, 4, "PL"),
+            ("krl", 5, 7, "PL"),
+            ("krl", 5, 7, "SG"),
+            ("vep", 3, 5, "SG"),
+            ("vep", 3, 6, "PL"),
         ]
-        assert expected_keys == sorted(expected_keys)
+        keys = [
+            (e.language, e.word_id, e.wordform_id, e.gramset)
+            for e in expected
+        ]
+        assert keys == expected_keys
 
-        reversed_instances = list(reversed(base_instances))
-        reversed_words = list(reversed(base_words))
         shuffled_candidates = [
-            make_instance(
-                "krl", 1, 10, 2, "a",
-                candidates=(Candidate(2, "PL"), Candidate(1, "SG")),
-                gold_analysis=Candidate(1, "SG"),
-            ),
-            make_instance(
-                "krl", 2, 20, 2, "b",
-                candidates=(Candidate(4, "PL"), Candidate(3, "SG")),
-                gold_analysis=Candidate(3, "SG"),
-            ),
-            make_instance(
-                "vep", 3, 30, 2, "c",
-                candidates=(Candidate(6, "PL"), Candidate(5, "SG")),
-                gold_analysis=Candidate(5, "SG"),
-            ),
+            replace(instance, candidates=tuple(reversed(instance.candidates)))
+            for instance in base_instances
         ]
-        got = build_candidate_examples(shuffled_candidates, reversed_words, mode="predict")
+        got = build_candidate_examples(
+            list(reversed(shuffled_candidates)),
+            list(reversed(base_words)),
+            mode=mode,
+        )
         assert got == expected
+        got_keys = [
+            (e.language, e.word_id, e.wordform_id, e.gramset)
+            for e in got
+        ]
+        assert got_keys == expected_keys
+
+    @pytest.mark.parametrize("mode", ["train", "predict"])
+    def test_assembly_does_not_read_xml_or_text_id(self, mode):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(2, "PL")),
+            gold_analysis=Candidate(1, "SG"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        expected = build_candidate_examples([instance], words, mode=mode)
+        guarded = AssemblyGuard(instance)
+        actual = build_candidate_examples([guarded], words, mode=mode)
+        assert actual
+        assert actual == expected
 
     def test_generator_inputs(self):
         instance_gen = (
