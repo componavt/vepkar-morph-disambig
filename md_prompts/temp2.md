@@ -41,5 +41,5 @@ T1.1a2 — разрешение контекста и его ошибки
 T1.1a3 — сборка CandidateExample и режимы train/predict
 T1.1a4 — приёмка полного контракта
 
-
-
+Implement T1.1a2 context resolution
+Implement T1.1a3 CandidateExample assembly
