@@ -15,6 +15,7 @@ from t1_features.features import (  # noqa: E402
     FeatureConstructionError,
     _build_features,
     _resolve_context,
+    build_candidate_examples,
 )
 from core.instances import Candidate, Instance  # noqa: E402
 
@@ -464,7 +465,13 @@ class TestValuesAndOrder:
             assert len(parts) == expected_sizes[parts[0]]
 
 
-def make_instance(language, word_id, sentence_id, word_number, word):
+def make_instance(
+    language, word_id, sentence_id, word_number, word, candidates=None, gold_analysis=None
+):
+    if candidates is None:
+        candidates = (Candidate(1, "SG"), Candidate(2, "PL"))
+    if gold_analysis is None:
+        gold_analysis = Candidate(1, "SG")
     return Instance(
         language=language,
         word_id=word_id,
@@ -473,8 +480,8 @@ def make_instance(language, word_id, sentence_id, word_number, word):
         word=word,
         word_number=word_number,
         sentence_xml="",
-        candidates=(Candidate(1, "SG"), Candidate(2, "PL")),
-        gold_analysis=Candidate(1, "SG"),
+        candidates=candidates,
+        gold_analysis=gold_analysis,
     )
 
 
@@ -584,10 +591,11 @@ class TestResolveContext:
         ]
         assert _resolve_context(instances, words) == {("krl", 317): ("A", "C")}
 
-    def test_nonpositive_position_on_nontarget_word_in_needed_sentence(self):
+    @pytest.mark.parametrize("bad_position", [0, -1])
+    def test_nonpositive_position_on_nontarget_word_in_needed_sentence(self, bad_position):
         instances = [make_instance("krl", 317, 50, 5, "B")]
         words = [
-            make_word("krl", 50, 901, 0, "A"),
+            make_word("krl", 50, 901, bad_position, "A"),
             make_word("krl", 50, 317, 5, "B"),
         ]
         with pytest.raises(FeatureConstructionError) as exc:
@@ -608,6 +616,21 @@ class TestResolveContext:
         message = str(exc.value)
         assert "krl" in message and "50" in message and "317" in message
         assert "duplicate" in message.lower()
+
+    def test_duplicate_position_reports_first_repeated_original_position(self):
+        instances = [make_instance("krl", 317, 50, 5, "B")]
+        words = [
+            make_word("krl", 50, 901, 2, "A"),
+            make_word("krl", 50, 902, 5, "A2"),
+            make_word("krl", 50, 903, 5, "A3"),
+            make_word("krl", 50, 904, 2, "A4"),
+            make_word("krl", 50, 317, 5, "B"),
+        ]
+        with pytest.raises(FeatureConstructionError) as exc:
+            _resolve_context(instances, words)
+        message = str(exc.value)
+        assert "duplicate word_number 2" in message
+        assert "duplicate word_number 5" not in message
 
     def test_missing_target_error(self):
         instances = [make_instance("krl", 317, 50, 5, "B")]
@@ -706,3 +729,308 @@ class TestResolveContext:
         ]
         result = _resolve_context(instances, words)
         assert result[("krl", 2)] == ("  a  ", "e\u0301\u0301")
+
+
+class GuardedInstance:
+    _ALLOWED = frozenset({"language", "sentence_id", "word_id", "word_number", "word"})
+
+    def __init__(self, instance):
+        self._instance = instance
+
+    def __getattr__(self, name):
+        if name in self._ALLOWED:
+            return getattr(self._instance, name)
+        raise AssertionError(f"forbidden attribute access: {name}")
+
+
+class TestGuardedContextAccess:
+    def test_resolve_context_uses_only_allowed_fields(self):
+        guarded = GuardedInstance(make_instance("krl", 317, 50, 5, "B"))
+        words = [
+            make_word("krl", 50, 901, 2, "A"),
+            make_word("krl", 50, 317, 5, "B"),
+            make_word("krl", 50, 840, 9, "C"),
+        ]
+        assert _resolve_context([guarded], words) == {("krl", 317): ("A", "C")}
+
+    @pytest.mark.parametrize(
+        "forbidden", ["candidates", "gold_analysis", "sentence_xml", "text_id"]
+    )
+    def test_forbidden_fields_raise_assertion_error(self, forbidden):
+        guarded = GuardedInstance(make_instance("krl", 317, 50, 5, "B"))
+        with pytest.raises(AssertionError):
+            getattr(guarded, forbidden)
+
+
+class NoGoldGuard:
+    def __init__(self, instance):
+        self._instance = instance
+
+    def __getattr__(self, name):
+        if name == "gold_analysis":
+            raise AssertionError("gold_analysis must not be accessed")
+        return getattr(self._instance, name)
+
+
+def make_context_words(language, sentence_id, triples):
+    return [make_word(language, sentence_id, word_id, number, word) for word_id, number, word in triples]
+
+
+class TestBuildCandidateExamples:
+    def test_hand_built_assembly(self):
+        instance = make_instance(
+            "krl", 5, 50, 2, "in",
+            candidates=(Candidate(7, "SG+GEN"),),
+            gold_analysis=Candidate(7, "SG+GEN"),
+        )
+        words = make_context_words("krl", 50, [(1, 1, "A"), (5, 2, "in"), (9, 3, "C")])
+        examples = build_candidate_examples([instance], words, mode="train")
+        assert len(examples) == 1
+        example = examples[0]
+        assert example.language == "krl"
+        assert example.word_id == 5
+        assert example.wordform_id == 7
+        assert example.gramset == "SG+GEN"
+        assert example.word == "in"
+        assert example.word_length == 2
+        assert example.left_word == "A"
+        assert example.right_word == "C"
+        assert example.label == 1
+        assert example.sample_weight == 1.0
+        expected_features = {
+            '["element","GEN"]': 1.0,
+            '["element","SG"]': 1.0,
+            '["gramset","SG+GEN"]': 1.0,
+            '["language","krl"]': 1.0,
+            '["language_gramset","krl","SG+GEN"]': 1.0,
+            '["left_gramset","SG+GEN","A"]': 1.0,
+            '["right_gramset","SG+GEN","C"]': 1.0,
+            '["suffix_gramset","SG+GEN","1","n"]': 1.0,
+            '["suffix_gramset","SG+GEN","2","in"]': 1.0,
+        }
+        assert example.features == expected_features
+
+    def test_two_field_gold_matching_shared_id_different_gramset(self):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(1, "PL")),
+            gold_analysis=Candidate(1, "SG"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        examples = build_candidate_examples([instance], words, mode="train")
+        by_key = {(e.wordform_id, e.gramset): e for e in examples}
+        assert by_key[(1, "SG")].label == 1
+        assert by_key[(1, "PL")].label == 0
+        assert sum(e.sample_weight for e in examples) == pytest.approx(1.0)
+        positives = [e for e in examples if e.label == 1]
+        assert len(positives) == 1
+
+    def test_two_field_gold_matching_shared_gramset_different_id(self):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(2, "SG")),
+            gold_analysis=Candidate(2, "SG"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        examples = build_candidate_examples([instance], words, mode="train")
+        by_key = {(e.wordform_id, e.gramset): e for e in examples}
+        assert by_key[(1, "SG")].label == 0
+        assert by_key[(2, "SG")].label == 1
+        assert sum(e.sample_weight for e in examples) == pytest.approx(1.0)
+        positives = [e for e in examples if e.label == 1]
+        assert len(positives) == 1
+
+    def test_missing_gold_match_error(self):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(2, "PL")),
+            gold_analysis=Candidate(9, "XX"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        with pytest.raises(FeatureConstructionError) as exc:
+            build_candidate_examples([instance], words, mode="train")
+        message = str(exc.value)
+        assert "krl" in message and "10" in message and "1" in message
+        assert "gold" in message.lower()
+
+    def test_multiple_gold_matches_error(self):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(1, "SG")),
+            gold_analysis=Candidate(1, "SG"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        with pytest.raises(FeatureConstructionError) as exc:
+            build_candidate_examples([instance], words, mode="train")
+        message = str(exc.value)
+        assert "krl" in message and "10" in message and "1" in message
+        assert "gold" in message.lower()
+
+    def test_empty_candidates_train_error(self):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(),
+            gold_analysis=Candidate(1, "SG"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        with pytest.raises(FeatureConstructionError) as exc:
+            build_candidate_examples([instance], words, mode="train")
+        message = str(exc.value)
+        assert "krl" in message and "10" in message and "1" in message
+        assert "gold" in message.lower()
+
+    def test_predict_labels_and_weights_none(self):
+        instance = make_instance("krl", 1, 10, 2, "a")
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        examples = build_candidate_examples([instance], words, mode="predict")
+        assert len(examples) == 2
+        assert all(e.label is None and e.sample_weight is None for e in examples)
+
+    def test_predict_unchanged_after_gold_replacement(self):
+        base = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(2, "PL")),
+            gold_analysis=Candidate(1, "SG"),
+        )
+        replaced = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(2, "PL")),
+            gold_analysis=Candidate(2, "PL"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        first = build_candidate_examples([base], words, mode="predict")
+        second = build_candidate_examples([replaced], words, mode="predict")
+        assert first == second
+
+    def test_predict_guard_forbids_only_gold_access(self):
+        instance = make_instance("krl", 1, 10, 2, "a")
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        examples = build_candidate_examples([NoGoldGuard(instance)], words, mode="predict")
+        assert len(examples) == 2
+        assert all(e.label is None and e.sample_weight is None for e in examples)
+
+    def test_distinct_candidates_equal_features_and_isolated_dicts(self):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(2, "SG")),
+            gold_analysis=Candidate(1, "SG"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        examples = build_candidate_examples([instance], words, mode="train")
+        assert len(examples) == 2
+        assert examples[0].features == examples[1].features
+        assert examples[0].features is not examples[1].features
+        examples[0].features.clear()
+        assert examples[1].features
+
+    def test_exact_tuple_ordering_after_permutations(self):
+        base_instances = [
+            make_instance("krl", 1, 10, 2, "a", candidates=(Candidate(1, "SG"), Candidate(2, "PL")), gold_analysis=Candidate(1, "SG")),
+            make_instance("krl", 2, 20, 2, "b", candidates=(Candidate(3, "SG"), Candidate(4, "PL")), gold_analysis=Candidate(3, "SG")),
+            make_instance("vep", 3, 30, 2, "c", candidates=(Candidate(5, "SG"), Candidate(6, "PL")), gold_analysis=Candidate(5, "SG")),
+        ]
+        base_words = make_context_words(
+            "krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")]
+        ) + make_context_words("krl", 20, [(2, 2, "b"), (3, 1, "x"), (4, 3, "y")]) + make_context_words("vep", 30, [(3, 2, "c"), (4, 1, "x"), (5, 3, "y")])
+        expected = build_candidate_examples(base_instances, base_words, mode="predict")
+        expected_keys = [
+            (e.language, e.word_id, e.wordform_id, e.gramset) for e in expected
+        ]
+        assert expected_keys == sorted(expected_keys)
+
+        reversed_instances = list(reversed(base_instances))
+        reversed_words = list(reversed(base_words))
+        shuffled_candidates = [
+            make_instance(
+                "krl", 1, 10, 2, "a",
+                candidates=(Candidate(2, "PL"), Candidate(1, "SG")),
+                gold_analysis=Candidate(1, "SG"),
+            ),
+            make_instance(
+                "krl", 2, 20, 2, "b",
+                candidates=(Candidate(4, "PL"), Candidate(3, "SG")),
+                gold_analysis=Candidate(3, "SG"),
+            ),
+            make_instance(
+                "vep", 3, 30, 2, "c",
+                candidates=(Candidate(6, "PL"), Candidate(5, "SG")),
+                gold_analysis=Candidate(5, "SG"),
+            ),
+        ]
+        got = build_candidate_examples(shuffled_candidates, reversed_words, mode="predict")
+        assert got == expected
+
+    def test_generator_inputs(self):
+        instance_gen = (
+            make_instance("krl", 1, 10, 2, "a")
+            for _ in (0,)
+        )
+        word_gen = (
+            word
+            for word in make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        )
+        examples = build_candidate_examples(instance_gen, word_gen, mode="train")
+        assert len(examples) == 2
+
+    def test_empty_instances_without_consuming_context(self):
+        def raising_context():
+            raise AssertionError("context_words must not be consumed")
+            yield  # pragma: no cover
+
+        assert build_candidate_examples([], raising_context(), mode="train") == ()
+        assert build_candidate_examples(iter([]), raising_context(), mode="predict") == ()
+
+    def test_invalid_mode_rejected_before_consuming_input(self):
+        def raising_instances():
+            raise AssertionError("instances must not be consumed")
+            yield  # pragma: no cover
+
+        def raising_context():
+            raise AssertionError("context_words must not be consumed")
+            yield  # pragma: no cover
+
+        with pytest.raises(FeatureConstructionError):
+            build_candidate_examples(raising_instances(), raising_context(), mode="rank")
+
+    def test_input_objects_unchanged(self):
+        instance_list = [
+            make_instance("krl", 1, 10, 2, "a"),
+            make_instance("krl", 2, 20, 2, "b"),
+        ]
+        word_list = make_context_words(
+            "krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")]
+        ) + make_context_words("krl", 20, [(2, 2, "b"), (3, 1, "x"), (4, 3, "y")])
+        original_instances = list(instance_list)
+        original_words = list(word_list)
+        build_candidate_examples(instance_list, word_list, mode="train")
+        assert instance_list == original_instances
+        assert word_list == original_words
+
+    def test_train_predict_metadata_and_features_match(self):
+        instance = make_instance(
+            "krl", 1, 10, 2, "a",
+            candidates=(Candidate(1, "SG"), Candidate(2, "PL")),
+            gold_analysis=Candidate(1, "SG"),
+        )
+        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+        train = build_candidate_examples([instance], words, mode="train")
+        predict = build_candidate_examples([instance], words, mode="predict")
+        assert len(train) == len(predict)
+        for te, pe in zip(train, predict):
+            assert te.language == pe.language
+            assert te.word_id == pe.word_id
+            assert te.wordform_id == pe.wordform_id
+            assert te.gramset == pe.gramset
+            assert te.word == pe.word
+            assert te.word_length == pe.word_length
+            assert te.left_word == pe.left_word
+            assert te.right_word == pe.right_word
+            assert te.features == pe.features
+
+    def test_context_errors_propagate(self):
+        instance = make_instance("krl", 317, 50, 5, "B")
+        words = [make_word("krl", 50, 901, 2, "A")]
+        with pytest.raises(FeatureConstructionError) as exc:
+            build_candidate_examples([instance], words, mode="train")
+        message = str(exc.value)
+        assert "missing" in message.lower()

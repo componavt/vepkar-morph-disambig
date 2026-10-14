@@ -1,6 +1,7 @@
 import json
+from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Literal
 
 from core.instances import Instance
 
@@ -68,8 +69,9 @@ def _resolve_context(
                 )
 
         numbers = [record.word_number for record in records]
-        if len(numbers) != len(set(numbers)):
-            duplicate = next(number for number in numbers if numbers.count(number) > 1)
+        counts = Counter(numbers)
+        if len(counts) != len(numbers):
+            duplicate = next(number for number in numbers if counts[number] > 1)
             raise FeatureConstructionError(
                 f"{language}: sentence {sentence_id}, target word {affected.word_id}: "
                 f"duplicate word_number {duplicate} in sentence"
@@ -134,3 +136,82 @@ def _build_features(
         suffix = word[-length:]
         features[json.dumps(["suffix_gramset", gramset, str(length), suffix], ensure_ascii=False, separators=(",", ":"))] = 1.0
     return dict(sorted(features.items()))
+
+
+def build_candidate_examples(
+    instances: Iterable[Instance],
+    context_words: Iterable[ContextWord],
+    *,
+    mode: Literal["train", "predict"],
+) -> tuple[CandidateExample, ...]:
+    if mode not in ("train", "predict"):
+        raise FeatureConstructionError(f"unsupported mode: {mode!r}")
+
+    materialized_instances = list(instances)
+    if not materialized_instances:
+        return ()
+
+    context = _resolve_context(materialized_instances, context_words)
+
+    examples: list[CandidateExample] = []
+    for instance in materialized_instances:
+        if mode == "train":
+            matches = [
+                candidate
+                for candidate in instance.candidates
+                if (candidate.wordform_id, candidate.gramset)
+                == (instance.gold_analysis.wordform_id, instance.gold_analysis.gramset)
+            ]
+            if len(matches) != 1:
+                raise FeatureConstructionError(
+                    f"{instance.language}: sentence {instance.sentence_id}, "
+                    f"word {instance.word_id}: expected exactly one candidate matching "
+                    f"gold analysis, found {len(matches)}"
+                )
+
+        left_word, right_word = context[(instance.language, instance.word_id)]
+        for candidate in instance.candidates:
+            if mode == "train":
+                label = (
+                    1
+                    if (candidate.wordform_id, candidate.gramset)
+                    == (instance.gold_analysis.wordform_id, instance.gold_analysis.gramset)
+                    else 0
+                )
+                sample_weight = 1.0 / len(instance.candidates)
+            else:
+                label = None
+                sample_weight = None
+            examples.append(
+                CandidateExample(
+                    language=instance.language,
+                    word_id=instance.word_id,
+                    wordform_id=candidate.wordform_id,
+                    gramset=candidate.gramset,
+                    word=instance.word,
+                    word_length=len(instance.word),
+                    left_word=left_word,
+                    right_word=right_word,
+                    features=_build_features(
+                        language=instance.language,
+                        gramset=candidate.gramset,
+                        word=instance.word,
+                        left_word=left_word,
+                        right_word=right_word,
+                    ),
+                    label=label,
+                    sample_weight=sample_weight,
+                )
+            )
+
+    return tuple(
+        sorted(
+            examples,
+            key=lambda example: (
+                example.language,
+                example.word_id,
+                example.wordform_id,
+                example.gramset,
+            ),
+        )
+    )
