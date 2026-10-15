@@ -31,6 +31,7 @@ from commands.inspect_data import (
 )
 from commands.make_splits import _run_make_splits
 from commands.predict_t1 import _run_predict_t1
+from commands.prepare_t1_run import _run_prepare_t1_run
 from commands.train_t1 import _run_train_t1
 from commands.validate_predictions import _run_validate_predictions
 
@@ -276,6 +277,35 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
     )
+    prepare_t1 = commands.add_parser(
+        "prepare-t1-run",
+        help="Record provenance and intended settings of a T1 dev experiment",
+        allow_abbrev=False,
+    )
+    prepare_t1.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path for the JSON run passport",
+    )
+    prepare_t1.add_argument(
+        "--C",
+        type=float,
+        default=1.0,
+        help="Logistic regression inverse regularization strength (default: 1.0)",
+    )
+    prepare_t1.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    prepare_t1.add_argument(
+        "--split-file",
+        type=Path,
+        required=True,
+        help="Path to the benchmark splits CSV",
+    )
     return parser
 
 
@@ -302,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_train_t1(args)
     if args.command == "predict-t1":
         return _run_predict_t1(args)
+    if args.command == "prepare-t1-run":
+        return _run_prepare_t1_run(args)
     parser.print_help()
     return 0
 
