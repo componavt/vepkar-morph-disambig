@@ -80,8 +80,11 @@ def _validate_model(model: T1Model) -> None:
             f"model.classifier must be a LogisticRegression, got {type(classifier).__name__}"
         )
     try:
-        check_is_fitted(vectorizer, ["vocabulary_"])
-        check_is_fitted(classifier)
+        check_is_fitted(vectorizer, ["vocabulary_", "feature_names_"])
+        check_is_fitted(
+            classifier,
+            ["classes_", "n_features_in_", "coef_", "intercept_"],
+        )
     except NotFittedError as exc:
         raise ModelBundleError("model contains unfitted components") from exc
     vocabulary = vectorizer.vocabulary_

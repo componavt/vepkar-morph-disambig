@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import scipy
 import sklearn
-from sklearn.exceptions import InconsistentVersionWarning
+from sklearn.exceptions import InconsistentVersionWarning, NotFittedError
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.linear_model import LogisticRegression
 
@@ -225,6 +225,61 @@ class TestSaveValidation:
         assert "got [1, 0]" in str(exc_info.value)
         assert not path.exists()
         assert list(tmp_path.iterdir()) == []
+
+
+MISSING_FITTED_ATTRIBUTES = [
+    ("vectorizer", "vocabulary_"),
+    ("vectorizer", "feature_names_"),
+    ("classifier", "classes_"),
+    ("classifier", "n_features_in_"),
+    ("classifier", "coef_"),
+    ("classifier", "intercept_"),
+]
+
+
+class TestMissingFittedAttribute:
+    @pytest.mark.parametrize("component,attribute", MISSING_FITTED_ATTRIBUTES)
+    def test_save_rejects_missing_fitted_attribute(
+        self, tmp_path, trained_model, component, attribute
+    ):
+        damaged = copy.deepcopy(trained_model)
+        delattr(getattr(damaged, component), attribute)
+        path = tmp_path / "model.bundle"
+        with pytest.raises(ModelBundleError) as caught:
+            save_model_bundle(damaged, path)
+        assert isinstance(caught.value.__cause__, NotFittedError)
+        assert "unfitted" in str(caught.value)
+        assert not path.exists()
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("component,attribute", MISSING_FITTED_ATTRIBUTES)
+    def test_load_rejects_missing_fitted_attribute(
+        self, tmp_path, trained_model, component, attribute
+    ):
+        saved = tmp_path / "saved.bundle"
+        save_model_bundle(trained_model, saved)
+        with saved.open("rb") as fh:
+            base = joblib.load(fh)
+        damaged = copy.deepcopy(trained_model)
+        delattr(getattr(damaged, component), attribute)
+        payload = dict(base)
+        payload["model"] = damaged
+        path = dump_payload(tmp_path, "damaged.bundle", payload)
+        before_bytes = path.read_bytes()
+        before_entries = sorted(p.name for p in tmp_path.iterdir())
+        with pytest.raises(ModelBundleError) as caught:
+            load_model_bundle(path)
+        assert str(path) in str(caught.value)
+        assert "unfitted" in str(caught.value)
+        cause = caught.value.__cause__
+        while cause is not None:
+            if isinstance(cause, NotFittedError):
+                break
+            cause = cause.__cause__
+        else:
+            raise AssertionError("NotFittedError not in exception chain")
+        assert path.read_bytes() == before_bytes
+        assert sorted(p.name for p in tmp_path.iterdir()) == before_entries
 
 
 def _without_key(base, key):
