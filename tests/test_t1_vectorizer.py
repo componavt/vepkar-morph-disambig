@@ -1,4 +1,5 @@
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,14 @@ def make_example(features, *, language="krl", gramset="SG", label=1, weight=0.5)
         features=features,
         label=label,
         sample_weight=weight,
+    )
+
+
+def other_fields(example):
+    return tuple(
+        getattr(example, field.name)
+        for field in fields(CandidateExample)
+        if field.name != "features"
     )
 
 
@@ -167,7 +176,14 @@ class TestFitErrors:
         vectorizer, matrix = fit_feature_vectorizer(
             [make_example({}), make_example(FIRST_FEATURES)]
         )
-        assert matrix.shape == (2, len(vectorizer.vocabulary_))
+        assert isinstance(matrix, csr_matrix)
+        assert matrix.dtype == np.float64
+        assert matrix.shape == (2, 2)
+        assert matrix.nnz == 2
+        assert vectorizer.get_feature_names_out().tolist() == [
+            '["gramset","SG"]',
+            '["language","krl"]',
+        ]
         assert matrix.toarray().tolist() == [
             [0.0, 0.0],
             [1.0, 1.0],
@@ -203,6 +219,8 @@ class TestGeneratorsAndImmutability:
         second_snapshot = dict(second.features)
         first_snapshot_id = id(first.features)
         second_snapshot_id = id(second.features)
+        first_other_fields = other_fields(first)
+        second_other_fields = other_fields(second)
         vectorizer, matrix = fit_feature_vectorizer(e for e in [first, second])
         assert matrix.toarray().tolist() == [
             [0.0, 1.0, 1.0],
@@ -213,14 +231,18 @@ class TestGeneratorsAndImmutability:
         assert id(first.features) == first_snapshot_id
         assert id(second.features) == second_snapshot_id
         transformed = transform_candidate_examples(
-            vectorizer, (make_example(dict(FIRST_FEATURES)) for _ in (0, 1))
+            vectorizer, (e for e in [first, second])
         )
         assert transformed.toarray().tolist() == [
             [0.0, 1.0, 1.0],
-            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
         ]
         assert first.features == first_snapshot
         assert second.features == second_snapshot
+        assert id(first.features) == first_snapshot_id
+        assert id(second.features) == second_snapshot_id
+        assert other_fields(first) == first_other_fields
+        assert other_fields(second) == second_other_fields
 
     def test_metadata_label_weight_do_not_matter(self):
         plain = make_example(dict(FIRST_FEATURES), label=1, weight=0.5)
