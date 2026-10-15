@@ -823,19 +823,48 @@ class TestBuildCandidateExamples:
         assert example.features == expected_features
 
     def test_two_field_gold_matching_shared_id_different_gramset(self):
-        instance = make_instance(
+        three_candidate = make_instance(
             "krl", 1, 10, 2, "a",
-            candidates=(Candidate(1, "SG"), Candidate(1, "PL")),
+            candidates=(Candidate(1, "SG"), Candidate(1, "PL"), Candidate(2, "SG")),
             gold_analysis=Candidate(1, "SG"),
         )
-        words = make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
-        examples = build_candidate_examples([instance], words, mode="train")
+        two_candidate = make_instance(
+            "krl", 2, 20, 2, "b",
+            candidates=(Candidate(4, "SG"), Candidate(4, "PL")),
+            gold_analysis=Candidate(4, "SG"),
+        )
+        words = (
+            make_context_words("krl", 10, [(1, 2, "a"), (2, 1, "x"), (3, 3, "y")])
+            + make_context_words("krl", 20, [(2, 2, "b"), (3, 1, "x"), (4, 3, "y")])
+        )
+        examples = build_candidate_examples(
+            [three_candidate, two_candidate], words, mode="train"
+        )
+        groups = {}
+        for example in examples:
+            groups.setdefault((example.language, example.word_id), []).append(example)
+        assert list(groups) == [("krl", 1), ("krl", 2)]
+        three_examples = groups[("krl", 1)]
+        two_examples = groups[("krl", 2)]
+        assert len(three_examples) == 3
+        assert [e.sample_weight for e in three_examples] == pytest.approx(
+            [1 / 3, 1 / 3, 1 / 3]
+        )
+        assert sum(e.sample_weight for e in three_examples) == pytest.approx(1.0)
+        assert len(two_examples) == 2
+        assert [e.sample_weight for e in two_examples] == pytest.approx(
+            [1 / 2, 1 / 2]
+        )
+        assert sum(e.sample_weight for e in two_examples) == pytest.approx(1.0)
         by_key = {(e.wordform_id, e.gramset): e for e in examples}
         assert by_key[(1, "SG")].label == 1
         assert by_key[(1, "PL")].label == 0
-        assert sum(e.sample_weight for e in examples) == pytest.approx(1.0)
-        positives = [e for e in examples if e.label == 1]
-        assert len(positives) == 1
+        assert by_key[(2, "SG")].label == 0
+        assert by_key[(4, "SG")].label == 1
+        assert by_key[(4, "PL")].label == 0
+        for group in groups.values():
+            positives = [e for e in group if e.label == 1]
+            assert len(positives) == 1
 
     def test_two_field_gold_matching_shared_gramset_different_id(self):
         instances = [
