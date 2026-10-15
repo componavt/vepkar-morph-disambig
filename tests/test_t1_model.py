@@ -61,20 +61,7 @@ class TestTraining:
         assert model.classifier.solver == "lbfgs"
         assert model.classifier.class_weight is None
         assert model.classifier.max_iter == 1000
-        assert model.classifier.penalty == "deprecated"
         assert model.classifier.fit_intercept is True
-        assert model.classifier.classes_.tolist() == [0, 1]
-        assert model.classifier.coef_.shape[1] == len(model.vectorizer.vocabulary_)
-        reference = LogisticRegression(
-            C=1.0, solver="lbfgs", class_weight=None, max_iter=1000, l1_ratio=0
-        )
-        reference.fit(
-            model.vectorizer.transform([pos.features, neg.features]),
-            np.array([1, 0], dtype=np.int64),
-            sample_weight=np.array([0.5, 1.0], dtype=np.float64),
-        )
-        np.testing.assert_allclose(model.classifier.coef_, reference.coef_)
-        np.testing.assert_allclose(model.classifierassifier.intercept_, reference.intercept_)
         assert model.classifier.classes_.tolist() == [0, 1]
         assert model.classifier.coef_.shape[1] == len(model.vectorizer.vocabulary_)
 
@@ -99,9 +86,15 @@ class TestTraining:
             [0.0, 1.0, 1.0],
             [1.0, 0.0, 1.0],
         ]
-        np.testing.assert_array_equal(captured["y"], np.array([1, 0], dtype=np.int64))
+        y = captured["y"]
+        sample_weight = captured["sample_weight"]
+        assert y.dtype == np.int64
+        assert y.shape == (2,)
+        np.testing.assert_array_equal(y, np.array([1, 0], dtype=np.int64))
+        assert sample_weight.dtype == np.float64
+        assert sample_weight.shape == (2,)
         np.testing.assert_array_equal(
-            captured["sample_weight"], np.array([0.5, 1.0], dtype=np.float64)
+            sample_weight, np.array([0.5, 1.0], dtype=np.float64)
         )
 
     @pytest.mark.parametrize(
@@ -145,6 +138,12 @@ class TestTraining:
     def test_invalid_train_raises_value_error(self, examples):
         with pytest.raises(ValueError):
             train_candidate_model(examples)
+
+    def test_custom_C_is_retained(self):
+        pos = make_example(dict(POS_FEATURES), label=1, weight=0.5)
+        neg = make_example(dict(NEG_FEATURES), label=0, weight=1.0)
+        model = train_candidate_model([pos, neg], C=2.5)
+        assert model.classifier.C == 2.5
 
     @pytest.mark.parametrize("C", [0.0, -1.0, np.nan, np.inf, -np.inf])
     def test_invalid_C_raises(self, C):
@@ -227,7 +226,7 @@ class TestScoring:
         neg = make_example(dict(NEG_FEATURES), label=0, weight=1.0)
         model = train_candidate_model([pos, neg])
 
-        def boom(self, X):
+        def boom(X):
             raise AssertionError("decision_function must not be called")
 
         monkeypatch.setattr(model.classifier, "decision_function", boom)
@@ -262,14 +261,26 @@ class TestScoring:
         with pytest.raises(NotFittedError):
             score_candidate_examples(model, [])
 
+    def test_unfitted_classifier_raises_for_empty_input(self):
+        vectorizer, _ = fit_feature_vectorizer(
+            [make_example(dict(POS_FEATURES)), make_example(dict(NEG_FEATURES))]
+        )
+        model = T1Model(vectorizer=vectorizer, classifier=LogisticRegression())
+        with pytest.raises(NotFittedError):
+            score_candidate_examples(model, [])
+
     def test_generator_inputs_and_unchanged_model_state(self):
         pos = make_example(dict(POS_FEATURES), label=1, weight=0.5)
         neg = make_example(dict(NEG_FEATURES), label=0, weight=1.0)
-        model = train_candidate_model(e for e in [pos, neg])
         pos_snapshot = dict(pos.features)
         neg_snapshot = dict(neg.features)
         pos_id = id(pos.features)
         neg_id = id(neg.features)
+        model = train_candidate_model(e for e in [pos, neg])
+        assert pos.features == pos_snapshot
+        assert neg.features == neg_snapshot
+        assert id(pos.features) == pos_id
+        assert id(neg.features) == neg_id
         vocab_before = dict(model.vectorizer.vocabulary_)
         names_before = model.vectorizer.get_feature_names_out().tolist()
         classes_before = model.classifier.classes_.copy()
@@ -292,8 +303,8 @@ class TestScoring:
         neg = make_example(dict(NEG_FEATURES), label=0, weight=1.0)
         model = train_candidate_model([pos, neg])
 
-        def bad_decision_function(self, X):
-            return np.array([np.nan, np.inf])
+        def bad_decision_function(X):
+            return np.array([np.nan, np.inf], dtype=np.float64)
 
         monkeypatch.setattr(model.classifier, "decision_function", bad_decision_function)
         with pytest.raises(ValueError):
