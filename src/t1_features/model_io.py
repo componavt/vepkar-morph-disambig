@@ -98,7 +98,7 @@ def _validate_model(model: T1Model) -> None:
             f"vocabulary size {n_features}"
         )
     classes = classifier.classes_
-    if classes.shape != (2,) or set(classes.tolist()) != {0, 1}:
+    if classes.shape != (2,) or classes.tolist() != [0, 1]:
         raise ModelBundleError(
             f"classifier classes must be exactly [0, 1], got {classes.tolist()}"
         )
@@ -130,7 +130,7 @@ def _validate_payload(payload: object) -> None:
     if set(payload) != set(_TOP_LEVEL_KEYS):
         raise ModelBundleError(
             f"payload keys must be exactly {sorted(_TOP_LEVEL_KEYS)}, "
-            f"got {sorted(payload)}"
+            f"got {sorted(repr(key) for key in payload)}"
         )
     if payload["format"] != _FORMAT_NAME:
         raise ModelBundleError(f"unsupported format {payload['format']!r}")
@@ -146,7 +146,7 @@ def _validate_payload(payload: object) -> None:
     if set(environment) != set(_ENVIRONMENT_KEYS):
         raise ModelBundleError(
             f"environment keys must be exactly {sorted(_ENVIRONMENT_KEYS)}, "
-            f"got {sorted(environment)}"
+            f"got {sorted(repr(key) for key in environment)}"
         )
     expected_versions = _current_environment()
     for key in _ENVIRONMENT_KEYS:
@@ -188,21 +188,75 @@ def save_model_bundle(model: T1Model, path: Path) -> None:
         "environment": _current_environment(),
         "model": model,
     }
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=_TEMP_PREFIX, suffix=_TEMP_SUFFIX, dir=str(parent)
-    )
+    try:
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=_TEMP_PREFIX, suffix=_TEMP_SUFFIX, dir=str(parent)
+        )
+    except OSError as exc:
+        raise ModelBundleError(
+            f"cannot save model bundle {path}: create temporary file: {exc}"
+        ) from exc
     temp_path = Path(temp_name)
-    stream = None
     try:
         try:
             stream = os.fdopen(descriptor, "wb")
-            joblib.dump(payload, stream, compress=0, protocol=5)
-        finally:
-            if stream is not None:
-                stream.close()
-            else:
+        except OSError as exc:
+            try:
                 os.close(descriptor)
-        os.link(temp_path, path)
+            except OSError as close_exc:
+                wrapped = ModelBundleError(
+                    f"cannot save model bundle {path}: open temporary stream "
+                    f"{temp_path}: {exc}"
+                )
+                wrapped.add_note(
+                    f"failed to close temporary model bundle descriptor: {close_exc}"
+                )
+                raise wrapped from exc
+            raise ModelBundleError(
+                f"cannot save model bundle {path}: open temporary stream "
+                f"{temp_path}: {exc}"
+            ) from exc
+        try:
+            joblib.dump(payload, stream, compress=0, protocol=5)
+        except OSError as exc:
+            try:
+                stream.close()
+            except OSError as close_exc:
+                wrapped = ModelBundleError(
+                    f"cannot save model bundle {path}: write temporary stream "
+                    f"{temp_path}: {exc}"
+                )
+                wrapped.add_note(
+                    f"failed to close temporary model bundle stream {temp_path}: "
+                    f"{close_exc}"
+                )
+                raise wrapped from exc
+            raise ModelBundleError(
+                f"cannot save model bundle {path}: write temporary stream "
+                f"{temp_path}: {exc}"
+            ) from exc
+        except BaseException as primary:
+            try:
+                stream.close()
+            except OSError as close_exc:
+                primary.add_note(
+                    f"failed to close temporary model bundle stream {temp_path}: "
+                    f"{close_exc}"
+                )
+            raise
+        try:
+            stream.close()
+        except OSError as exc:
+            raise ModelBundleError(
+                f"cannot save model bundle {path}: close temporary stream "
+                f"{temp_path}: {exc}"
+            ) from exc
+        try:
+            os.link(temp_path, path)
+        except OSError as exc:
+            raise ModelBundleError(
+                f"cannot save model bundle {path}: publish {temp_path}: {exc}"
+            ) from exc
     except BaseException as exc:
         try:
             temp_path.unlink()
