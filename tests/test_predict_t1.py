@@ -1,5 +1,6 @@
 """Offline tests for the predict-t1 CLI command."""
 
+import argparse
 import csv
 import sys
 from pathlib import Path
@@ -8,6 +9,9 @@ import numpy as np
 import pandas as pd
 import pytest
 import joblib
+from sklearn.exceptions import NotFittedError
+from sklearn.feature_extraction import DictVectorizer
+from sklearn.linear_model import LogisticRegression
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
@@ -16,13 +20,20 @@ sys.path.insert(0, str(SRC))
 import benchmark_context  # noqa: E402
 import cli  # noqa: E402
 import commands.predict_t1 as predict_pkg  # noqa: E402
-from core.data import SUPPORTED_LANGUAGES, CorpusTables  # noqa: E402
+from core.data import DataError, SUPPORTED_LANGUAGES, CorpusTables  # noqa: E402
+from core.instances import CorpusTagError  # noqa: E402
 from core.predictions import (  # noqa: E402
     PREDICTION_HEADER,
+    BenchmarkIntegrityError,
     PredictionValidation,
     validate_predictions,
 )
-from t1_features.features import CandidateExample, build_candidate_examples  # noqa: E402
+from core.splits import SplitError  # noqa: E402
+from t1_features.features import (  # noqa: E402
+    CandidateExample,
+    FeatureConstructionError,
+    build_candidate_examples,
+)
 from t1_features.model import score_candidate_examples, train_candidate_model  # noqa: E402
 from t1_features.model_io import load_model_bundle, save_model_bundle  # noqa: E402
 from t1_features.prediction_io import T1PredictionWriteError  # noqa: E402
@@ -163,17 +174,25 @@ def _split_rows():
 
 
 def _train_examples():
+    positive_features = {
+        '["gramset","DEV+ONLY"]': 1.0,
+        '["language","krl"]': 1.0,
+    }
+    negative_features = {
+        '["gramset","DEV+ALT"]': 1.0,
+        '["language","krl"]': 1.0,
+    }
     return (
         CandidateExample(
             language="krl",
             word_id=1,
             wordform_id=10,
-            gramset="SG",
+            gramset="DEV+ONLY",
             word="a",
             word_length=1,
             left_word="<BOS>",
             right_word="b",
-            features={"gramset:SG": 1.0, "lang:krl": 1.0},
+            features=positive_features,
             label=1,
             sample_weight=0.5,
         ),
@@ -181,12 +200,12 @@ def _train_examples():
             language="krl",
             word_id=1,
             wordform_id=11,
-            gramset="PL",
+            gramset="DEV+ALT",
             word="a",
             word_length=1,
             left_word="<BOS>",
             right_word="b",
-            features={"gramset:PL": 1.0, "lang:krl": 1.0},
+            features=negative_features,
             label=0,
             sample_weight=0.5,
         ),
@@ -218,6 +237,24 @@ def _read_csv(path):
         header = next(reader)
         rows = list(reader)
     return header, rows
+
+
+def _recursive_entries(root):
+    return {path.relative_to(root).as_posix() for path in root.rglob("*")}
+
+
+def _raise_stub(exc_type, message):
+    def raise_exc(*args, **kwargs):
+        raise exc_type(message)
+
+    return raise_exc
+
+
+def _forbid_stage_call(monkeypatch, name):
+    def forbidden(*args, **kwargs):
+        pytest.fail(f"stage must not be called: {name}")
+
+    monkeypatch.setattr(predict_pkg, name, forbidden)
 
 
 class TestArgumentParsing:
@@ -320,6 +357,77 @@ class TestDestinationProtection:
         assert str(missing_parent) in captured.err
         assert not missing_parent.exists()
         assert not list(tmp_path.glob(".vepkar-t1-predictions-*.tmp"))
+        assert "T1 prediction: OK" not in captured.out
+
+    def test_output_directory_rejected_before_loading(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _forbid_preflight(monkeypatch)
+        _forbid_model_load(monkeypatch)
+        existing = tmp_path / "existing"
+        existing.mkdir()
+        marker = existing / "keep.txt"
+        marker.write_text("original", encoding="utf-8")
+        entries_before = _recursive_entries(tmp_path)
+        status = cli.main(
+            [
+                "predict-t1",
+                "--model", str(tmp_path / "m.bundle"),
+                "--split", "dev",
+                "--output", str(existing),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "output path is a directory" in captured.err
+        assert str(existing) in captured.err
+        assert marker.read_text(encoding="utf-8") == "original"
+        assert _recursive_entries(tmp_path) == entries_before
+        assert not list(tmp_path.glob(".vepkar-t1-predictions-*.tmp"))
+        assert "T1 prediction: OK" not in captured.out
+
+    def test_dangling_output_symlink_rejected_before_loading(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _forbid_preflight(monkeypatch)
+        _forbid_model_load(monkeypatch)
+        target = tmp_path / "absent.csv"
+        output = tmp_path / "linked.csv"
+        output.symlink_to(target)
+        entries_before = _recursive_entries(tmp_path)
+        status = cli.main(
+            [
+                "predict-t1",
+                "--model", str(tmp_path / "m.bundle"),
+                "--split", "dev",
+                "--output", str(output),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "already exists" in captured.err
+        assert str(output) in captured.err
+        assert output.is_symlink()
+        assert output.readlink() == target
+        assert _recursive_entries(tmp_path) == entries_before
+        assert not list(tmp_path.glob(".vepkar-t1-predictions-*.tmp"))
+        assert "T1 prediction: OK" not in captured.out
+
+    def test_direct_handler_rejects_non_dev_split(self, monkeypatch, capsys):
+        _forbid_preflight(monkeypatch)
+        _forbid_model_load(monkeypatch)
+        args = argparse.Namespace(
+            split="train",
+            model=Path("m.bundle"),
+            output=Path("out.csv"),
+            data_dir=None,
+            split_file=None,
+        )
+        status = predict_pkg._run_predict_t1(args)
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "supports only the dev split" in captured.err
+        assert "'train'" in captured.err
         assert "T1 prediction: OK" not in captured.out
 
 
@@ -455,8 +563,43 @@ class TestSuccessfulPrediction:
         tables = _install_tables(monkeypatch)
         _stub_preflight(monkeypatch)
         data_dir, split_file, bundle, output = _success_env(tmp_path)
-        words_before = tables["krl"].words.copy(deep=True)
+
+        bundle_before = bundle.read_bytes()
         split_before = split_file.read_bytes()
+        tables_before = {
+            lang: {
+                table_name: getattr(tables[lang], table_name).copy(deep=True)
+                for table_name in ("texts", "sentences", "words", "candidates")
+            }
+            for lang in SUPPORTED_LANGUAGES
+        }
+        entries_before = _recursive_entries(tmp_path)
+
+        captured_model = {}
+
+        def forbid_fit(*args, **kwargs):
+            raise AssertionError("prediction must never retrain or refit the model")
+
+        monkeypatch.setattr(LogisticRegression, "fit", forbid_fit)
+        monkeypatch.setattr(DictVectorizer, "fit", forbid_fit)
+        monkeypatch.setattr(DictVectorizer, "fit_transform", forbid_fit)
+
+        original_load = predict_pkg.load_model_bundle
+
+        def guarded_load_model(path):
+            model = original_load(path)
+            captured_model["model"] = model
+            captured_model["snapshot"] = {
+                "vocabulary": dict(model.vectorizer.vocabulary_),
+                "feature_names": model.vectorizer.get_feature_names_out().copy(),
+                "classes": model.classifier.classes_.copy(),
+                "coef": model.classifier.coef_.copy(),
+                "intercept": model.classifier.intercept_.copy(),
+            }
+            return model
+
+        monkeypatch.setattr(predict_pkg, "load_model_bundle", guarded_load_model)
+
         status = cli.main(
             [
                 "predict-t1",
@@ -484,6 +627,10 @@ class TestSuccessfulPrediction:
         header, raw_rows = _read_csv(output)
         assert header == list(PREDICTION_HEADER)
         assert len(raw_rows) == 2
+        assert [(int(r[1]), r[2], int(r[3])) for r in raw_rows] == [
+            (2050, "DEV+ONLY", 1),
+            (2051, "DEV+ALT", 2),
+        ]
         rows = [
             (int(r[0]), int(r[1]), r[2], int(r[3]), float(r[4]))
             for r in raw_rows
@@ -495,6 +642,31 @@ class TestSuccessfulPrediction:
         }
         assert sorted(row[3] for row in rows) == [1, 2]
         assert all(row[0] not in (102, 308) for row in rows)
+        assert rows[0][4] != rows[1][4]
+        assert rows[0][4] > rows[1][4]
+
+        model = captured_model["model"]
+        snapshot = captured_model["snapshot"]
+        assert dict(model.vectorizer.vocabulary_) == snapshot["vocabulary"]
+        np.testing.assert_array_equal(
+            model.vectorizer.get_feature_names_out(), snapshot["feature_names"]
+        )
+        np.testing.assert_array_equal(model.classifier.classes_, snapshot["classes"])
+        np.testing.assert_array_equal(model.classifier.coef_, snapshot["coef"])
+        np.testing.assert_array_equal(
+            model.classifier.intercept_, snapshot["intercept"]
+        )
+
+        assert bundle.read_bytes() == bundle_before
+        assert split_file.read_bytes() == split_before
+        for lang in SUPPORTED_LANGUAGES:
+            for table_name in ("texts", "sentences", "words", "candidates"):
+                pd.testing.assert_frame_equal(
+                    getattr(tables[lang], table_name),
+                    tables_before[lang][table_name],
+                )
+        assert _recursive_entries(tmp_path) == entries_before | {"dev-predictions.csv"}
+        assert not list(tmp_path.glob(".vepkar-t1-predictions-*.tmp"))
 
         loaded = load_model_bundle(bundle)
         inputs = predict_pkg.load_t1_inputs(
@@ -524,12 +696,283 @@ class TestSuccessfulPrediction:
         assert validation.expected_word_count == 1
         assert validation.expected_candidate_count == 2
 
+
+class TestStageFailures:
+    @pytest.mark.parametrize(
+        "case",
+        [
+            {
+                "stage": "preflight",
+                "target": "_preflight_benchmark",
+                "exc_type": CorpusTagError,
+                "exc_message": "Multiple Git tags point at HEAD: v1, v2",
+                "diag": ("error: Multiple Git tags point at HEAD",),
+                "forbid_later": (
+                    "load_t1_inputs",
+                    "build_candidate_examples",
+                    "score_candidate_examples",
+                    "rank_candidate_scores",
+                    "write_dev_predictions",
+                ),
+                "install_tables": False,
+                "stub_preflight": False,
+            },
+            {
+                "stage": "preflight",
+                "target": "_preflight_benchmark",
+                "exc_type": DataError,
+                "exc_message": "Local dictorpus-data checkout is missing",
+                "diag": ("error: Local dictorpus-data checkout is missing",),
+                "forbid_later": (
+                    "load_t1_inputs",
+                    "build_candidate_examples",
+                    "score_candidate_examples",
+                    "rank_candidate_scores",
+                    "write_dev_predictions",
+                ),
+                "install_tables": False,
+                "stub_preflight": False,
+            },
+            {
+                "stage": "input",
+                "target": "load_t1_inputs",
+                "exc_type": SplitError,
+                "exc_message": "Unsupported split label 'bogus' for ('krl', 1)",
+                "diag": ("error: Unsupported split label 'bogus'",),
+                "forbid_later": (
+                    "build_candidate_examples",
+                    "score_candidate_examples",
+                    "rank_candidate_scores",
+                    "write_dev_predictions",
+                ),
+            },
+            {
+                "stage": "input",
+                "target": "load_t1_inputs",
+                "exc_type": BenchmarkIntegrityError,
+                "exc_message": "Strict benchmark has duplicate word_id values",
+                "diag": (
+                    "error: strict benchmark is internally inconsistent:",
+                    "duplicate word_id",
+                ),
+                "forbid_later": (
+                    "build_candidate_examples",
+                    "score_candidate_examples",
+                    "rank_candidate_scores",
+                    "write_dev_predictions",
+                ),
+            },
+            {
+                "stage": "load-data",
+                "exc_type": DataError,
+                "exc_message": "Expected corpus export not found: vep texts table",
+                "diag": ("FAILED", "Expected corpus export not found"),
+                "forbid_later": (
+                    "build_candidate_examples",
+                    "score_candidate_examples",
+                    "rank_candidate_scores",
+                    "write_dev_predictions",
+                ),
+                "install_tables": False,
+            },
+            {
+                "stage": "construction",
+                "target": "build_candidate_examples",
+                "exc_type": FeatureConstructionError,
+                "exc_message": "target word missing from sentence context",
+                "diag": (
+                    "error: T1 feature construction failed:",
+                    "target word missing",
+                ),
+                "forbid_later": (
+                    "score_candidate_examples",
+                    "rank_candidate_scores",
+                    "write_dev_predictions",
+                ),
+            },
+            {
+                "stage": "scoring",
+                "target": "score_candidate_examples",
+                "exc_type": NotFittedError,
+                "exc_message": "This LogisticRegression instance is not fitted yet",
+                "diag": ("error: T1 model is not fitted:", "not fitted"),
+                "forbid_later": ("rank_candidate_scores", "write_dev_predictions"),
+            },
+            {
+                "stage": "scoring",
+                "target": "score_candidate_examples",
+                "exc_type": ValueError,
+                "exc_message": "candidate scores must be finite",
+                "diag": (
+                    "error: T1 scoring failed:",
+                    "candidate scores must be finite",
+                ),
+                "forbid_later": ("rank_candidate_scores", "write_dev_predictions"),
+            },
+            {
+                "stage": "ranking",
+                "target": "rank_candidate_scores",
+                "exc_type": BenchmarkIntegrityError,
+                "exc_message": "duplicate candidate identity",
+                "diag": (
+                    "error: strict benchmark is internally inconsistent:",
+                    "duplicate candidate identity",
+                ),
+                "forbid_later": ("write_dev_predictions",),
+            },
+            {
+                "stage": "ranking",
+                "target": "rank_candidate_scores",
+                "exc_type": ValueError,
+                "exc_message": "score must be finite",
+                "diag": ("error: T1 ranking failed:", "score must be finite"),
+                "forbid_later": ("write_dev_predictions",),
+            },
+            {
+                "stage": "writer",
+                "exc_type": T1PredictionWriteError,
+                "exc_message": "cannot write dev predictions: publish failed: test failure",
+                "note": (
+                    "failed to clean up temporary dev predictions "
+                    ".vepkar-t1-predictions-1.tmp: Permission denied"
+                ),
+                "diag": (
+                    "error: cannot write dev predictions",
+                    "failed to clean up temporary",
+                ),
+                "forbid_later": (),
+            },
+        ],
+        ids=lambda case: f"{case['stage']}-{case['exc_type'].__name__}",
+    )
+    def test_stage_failure_reported(self, tmp_path, monkeypatch, capsys, case):
+        if case.get("install_tables", True):
+            _install_tables(monkeypatch)
+        if case.get("stub_preflight", True):
+            _stub_preflight(monkeypatch)
+        data_dir, split_file, bundle, output = _success_env(tmp_path)
+
+        for name in case["forbid_later"]:
+            _forbid_stage_call(monkeypatch, name)
+
+        if case["stage"] == "preflight":
+            monkeypatch.setattr(
+                predict_pkg,
+                case["target"],
+                _raise_stub(case["exc_type"], case["exc_message"]),
+            )
+        elif case["stage"] == "load-data":
+
+            def raise_data_error(*args, **kwargs):
+                raise DataError(case["exc_message"])
+
+            monkeypatch.setattr(
+                benchmark_context, "read_corpus_tables", raise_data_error
+            )
+        elif case["stage"] == "writer":
+
+            def failing_writer(rows, output_path, *, benchmark):
+                error = T1PredictionWriteError(case["exc_message"])
+                error.add_note(case["note"])
+                raise error
+
+            monkeypatch.setattr(predict_pkg, "write_dev_predictions", failing_writer)
+        else:
+            monkeypatch.setattr(
+                predict_pkg,
+                case["target"],
+                _raise_stub(case["exc_type"], case["exc_message"]),
+            )
+
+        status = cli.main(
+            [
+                "predict-t1",
+                "--model", str(bundle),
+                "--split", "dev",
+                "--output", str(output),
+                "--data-dir", str(data_dir),
+                "--split-file", str(split_file),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 1
+        for fragment in case["diag"]:
+            assert fragment in captured.err
+        if case["stage"] == "load-data":
+            assert captured.err.count(case["exc_message"]) == 1
+        assert "Traceback" not in captured.err
+        assert "T1 prediction: OK" not in captured.out
+        assert not output.exists()
         assert not list(tmp_path.glob(".vepkar-t1-predictions-*.tmp"))
-        assert set(p.name for p in tmp_path.iterdir()) == {
-            "checkout",
-            "dev-predictions.csv",
-            "models",
-            "splits.csv",
-        }
-        pd.testing.assert_frame_equal(tables["krl"].words, words_before)
-        assert split_file.read_bytes() == split_before
+
+
+class TestPublishedCleanupFailure:
+    def test_published_csv_reported_when_cleanup_fails(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _install_tables(monkeypatch)
+        _stub_preflight(monkeypatch)
+        data_dir, split_file, bundle, output = _success_env(tmp_path)
+        bundle_before = bundle.read_bytes()
+
+        original_unlink = Path.unlink
+
+        def guarded_unlink(path, *args, **kwargs):
+            if (
+                path.name.startswith(".vepkar-t1-predictions-")
+                and path.name.endswith(".tmp")
+            ):
+                raise PermissionError(
+                    f"permission denied: remove temporary predictions file {path}"
+                )
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", guarded_unlink)
+
+        status = cli.main(
+            [
+                "predict-t1",
+                "--model", str(bundle),
+                "--split", "dev",
+                "--output", str(output),
+                "--data-dir", str(data_dir),
+                "--split-file", str(split_file),
+            ]
+        )
+        captured = capsys.readouterr()
+        temp_files = list(tmp_path.glob(".vepkar-t1-predictions-*.tmp"))
+
+        assert status == 1
+        assert "were published" in captured.err
+        assert "temporary cleanup failed" in captured.err
+        assert str(output) in captured.err
+        assert len(temp_files) == 1
+        assert str(temp_files[0]) in captured.err
+        assert "permission denied" in captured.err
+        assert "T1 prediction: OK" not in captured.out
+        assert output.exists()
+
+        header, raw_rows = _read_csv(output)
+        assert header == list(PREDICTION_HEADER)
+        assert len(raw_rows) == 2
+
+        inputs = predict_pkg.load_t1_inputs(
+            data_dir,
+            "fixture-tag",
+            split="dev",
+            split_file_override=split_file,
+        )
+        validation = validate_predictions(
+            output,
+            "dev",
+            inputs.benchmark.instances,
+            inputs.benchmark.split_rows,
+        )
+        assert validation.is_valid
+        assert validation.expected_word_count == 1
+        assert validation.expected_candidate_count == 2
+        assert validation.predicted_candidate_count == 2
+
+        assert bundle.read_bytes() == bundle_before
+
+        original_unlink(temp_files[0])
