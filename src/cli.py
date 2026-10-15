@@ -30,6 +30,7 @@ from commands.inspect_data import (
     _print_class_examples,
 )
 from commands.make_splits import _run_make_splits
+from commands.predict_t1 import _run_predict_t1
 from commands.train_t1 import _run_train_t1
 from commands.validate_predictions import _run_validate_predictions
 
@@ -240,6 +241,41 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
     )
+    predict_t1 = commands.add_parser(
+        "predict-t1",
+        help="Predict dev candidate rankings with a saved T1 model bundle",
+        allow_abbrev=False,
+    )
+    predict_t1.add_argument(
+        "--model",
+        type=Path,
+        required=True,
+        help="Path to a trusted local T1 model bundle",
+    )
+    predict_t1.add_argument(
+        "--split",
+        choices=("dev",),
+        required=True,
+        help="Benchmark split to predict (only dev is supported)",
+    )
+    predict_t1.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path for the generated dev predictions CSV",
+    )
+    predict_t1.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    predict_t1.add_argument(
+        "--split-file",
+        type=Path,
+        default=None,
+        help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
+    )
     return parser
 
 
@@ -264,6 +300,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_evaluate_predictions(args)
     if args.command == "train-t1":
         return _run_train_t1(args)
+    if args.command == "predict-t1":
+        return _run_predict_t1(args)
     parser.print_help()
     return 0
 
