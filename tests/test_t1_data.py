@@ -335,7 +335,15 @@ class TestT1Loading:
             if example.word_id == WORD_BASE[example.language] + 2:
                 assert (example.left_word, example.right_word) == ("A", "C")
         dev = load_t1_inputs(tmp_path, "tag", split="dev", split_file_override=split_path)
-        dev_examples = build_candidate_examples(dev.instances, dev.context_words, mode="train")
+        dev_examples = build_candidate_examples(
+            dev.instances,
+            dev.context_words,
+            mode="predict",
+        )
+        assert all(
+            e.label is None and e.sample_weight is None
+            for e in dev_examples
+        )
         assert len(dev_examples) == 8
         for example in dev_examples:
             if example.word_id == WORD_BASE[example.language] + 5:
