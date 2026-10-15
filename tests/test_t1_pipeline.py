@@ -88,6 +88,28 @@ def _identity(example):
     return (example.language, example.word_id, example.wordform_id, example.gramset)
 
 
+def _snapshot_model(model):
+    return {
+        "vocabulary": dict(model.vectorizer.vocabulary_),
+        "feature_names": model.vectorizer.get_feature_names_out().copy(),
+        "classes": model.classifier.classes_.copy(),
+        "coef": model.classifier.coef_.copy(),
+        "intercept": model.classifier.intercept_.copy(),
+    }
+
+
+def _assert_model_state(model, snapshot):
+    assert dict(model.vectorizer.vocabulary_) == snapshot["vocabulary"]
+    np.testing.assert_array_equal(
+        model.vectorizer.get_feature_names_out(), snapshot["feature_names"]
+    )
+    np.testing.assert_array_equal(model.classifier.classes_, snapshot["classes"])
+    np.testing.assert_array_equal(model.classifier.coef_, snapshot["coef"])
+    np.testing.assert_array_equal(
+        model.classifier.intercept_, snapshot["intercept"]
+    )
+
+
 class TestOfflinePipeline:
     def test_train_save_load_predict_round_trip(self, tmp_path):
         train_instances, predict_instances, context_words = _make_fixture()
@@ -124,6 +146,7 @@ class TestOfflinePipeline:
         assert {(e.left_word, e.right_word) for e in predict_examples} == {("lw3", "rw3")}
 
         model = train_candidate_model(train_examples)
+        model_snapshot = _snapshot_model(model)
         before = score_candidate_examples(model, predict_examples)
         assert before.shape == (2,)
         assert before.dtype == np.float64
@@ -140,6 +163,7 @@ class TestOfflinePipeline:
         before_entries = sorted((p.name, p.stat().st_size) for p in bundle_dir.iterdir())
 
         loaded = load_model_bundle(path)
+        loaded_snapshot = _snapshot_model(loaded)
         after = score_candidate_examples(loaded, predict_examples)
         np.testing.assert_allclose(after, before)
         assert after.shape == (2,)
@@ -167,6 +191,9 @@ class TestOfflinePipeline:
             loaded.classifier.intercept_, model.classifier.intercept_
         )
 
+        _assert_model_state(model, model_snapshot)
+        _assert_model_state(loaded, loaded_snapshot)
+
     def test_predict_order_gold_and_state_are_stable(self, tmp_path):
         train_instances, predict_instances, context_words = _make_fixture()
         train_examples = build_candidate_examples(
@@ -185,12 +212,10 @@ class TestOfflinePipeline:
         save_model_bundle(model, path)
         loaded = load_model_bundle(path)
 
-        model_coef = model.classifier.coef_.copy()
-        model_intercept = model.classifier.intercept_.copy()
-        model_vocab = dict(model.vectorizer.vocabulary_)
-        loaded_coef = loaded.classifier.coef_.copy()
-        loaded_intercept = loaded.classifier.intercept_.copy()
-        loaded_vocab = dict(loaded.vectorizer.vocabulary_)
+        model_snapshot = _snapshot_model(model)
+        loaded_snapshot = _snapshot_model(loaded)
+        before_bytes = path.read_bytes()
+        before_entries = sorted((p.name, p.stat().st_size) for p in tmp_path.iterdir())
 
         forward = score_candidate_examples(loaded, predict_examples)
         reversed_examples = predict_examples[::-1]
@@ -232,9 +257,9 @@ class TestOfflinePipeline:
             assert example.features == copy
             assert id(example.features) == identity
 
-        np.testing.assert_array_equal(model.classifier.coef_, model_coef)
-        np.testing.assert_array_equal(model.classifier.intercept_, model_intercept)
-        assert dict(model.vectorizer.vocabulary_) == model_vocab
-        np.testing.assert_array_equal(loaded.classifier.coef_, loaded_coef)
-        np.testing.assert_array_equal(loaded.classifier.intercept_, loaded_intercept)
-        assert dict(loaded.vectorizer.vocabulary_) == loaded_vocab
+        _assert_model_state(model, model_snapshot)
+        _assert_model_state(loaded, loaded_snapshot)
+        assert path.read_bytes() == before_bytes
+        assert sorted((p.name, p.stat().st_size) for p in tmp_path.iterdir()) == (
+            before_entries
+        )

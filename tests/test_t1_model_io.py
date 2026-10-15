@@ -593,9 +593,11 @@ class TestSaveFailureCleanup:
                 OSError("simulated close failure"),
             )
 
+        original_link = os.link
+
         def recording_link(source, destination):
             link_calls.append(Path(source))
-            return os.link(source, destination)
+            return original_link(source, destination)
 
         monkeypatch.setattr(model_io.joblib, "dump", failing_dump)
         monkeypatch.setattr(model_io.os, "fdopen", closing_fail_fdopen)
@@ -622,9 +624,11 @@ class TestSaveFailureCleanup:
                 OSError("simulated close failure"),
             )
 
+        original_link = os.link
+
         def recording_link(source, destination):
             link_calls.append(Path(source))
-            return os.link(source, destination)
+            return original_link(source, destination)
 
         monkeypatch.setattr(model_io.os, "fdopen", closing_fail_fdopen)
         monkeypatch.setattr(model_io.os, "link", recording_link)
@@ -653,7 +657,13 @@ class TestSaveFailureCleanup:
             return original_link(source, destination)
 
         def failing_unlink(self, *args, **kwargs):
-            raise OSError("simulated unlink failure")
+            if (
+                self.parent == tmp_path
+                and self.name.startswith(".vepkar-t1-model-")
+                and self.name.endswith(".tmp")
+            ):
+                raise OSError("simulated unlink failure")
+            return original_unlink(self, *args, **kwargs)
 
         monkeypatch.setattr(model_io.joblib, "dump", failing_dump)
         monkeypatch.setattr(model_io.os, "link", recording_link)
@@ -668,6 +678,12 @@ class TestSaveFailureCleanup:
         assert not path.exists()
         temp_files = [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
         assert len(temp_files) == 1
+
+        probe = tmp_path / "unrelated-probe.txt"
+        probe.write_bytes(b"probe")
+        probe.unlink()
+        assert not probe.exists()
+
         for temp in temp_files:
             original_unlink(temp)
         assert sorted(p.name for p in tmp_path.iterdir()) == []
