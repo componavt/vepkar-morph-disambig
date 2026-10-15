@@ -7,6 +7,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import pandas as pd
+
 from core.data import (
     DataError,
     SUPPORTED_LANGUAGES,
@@ -66,6 +68,7 @@ class BenchmarkContext:
     split_path: Path
     instances: tuple[Instance, ...]
     split_rows: tuple[tuple[str, int, str], ...]
+    word_tables: dict[str, pd.DataFrame] | None = None
 
 
 def _preflight_benchmark(
@@ -82,9 +85,12 @@ def load_benchmark_context(
     data_dir: Path,
     tag: str,
     split_file_override: Path | None = None,
+    *,
+    include_words: bool = False,
 ) -> BenchmarkContext:
     """Load strict instances and split rows without writing anything."""
     instances: list[Instance] = []
+    word_tables: dict[str, pd.DataFrame] = {}
     for lang in SUPPORTED_LANGUAGES:
         try:
             tables = read_corpus_tables(lang, data_dir)
@@ -93,6 +99,8 @@ def load_benchmark_context(
             print(f"  {lang}  FAILED: {exc}", file=sys.stderr, flush=True)
             raise
         instances.extend(result.instances)
+        if include_words:
+            word_tables[lang] = tables.words
     split_path = (
         split_file_override
         if split_file_override is not None
@@ -104,4 +112,5 @@ def load_benchmark_context(
         split_path=split_path,
         instances=tuple(instances),
         split_rows=split_rows,
+        word_tables=word_tables if include_words else None,
     )
