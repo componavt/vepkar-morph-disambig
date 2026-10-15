@@ -22,7 +22,7 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install pandas zstandard pytest
+python -m pip install pandas zstandard scikit-learn scipy pytest
 python -m pytest -q
 ```
 

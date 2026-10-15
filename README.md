@@ -20,7 +20,7 @@ Python 3.11 or newer and Git are required.
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install pandas zstandard pytest
+python -m pip install pandas zstandard scikit-learn scipy pytest
 python -m pytest -q
 ```
 
