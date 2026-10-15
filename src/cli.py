@@ -30,6 +30,7 @@ from commands.inspect_data import (
     _print_class_examples,
 )
 from commands.make_splits import _run_make_splits
+from commands.train_t1 import _run_train_t1
 from commands.validate_predictions import _run_validate_predictions
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -210,6 +211,35 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
     )
+    train_t1 = commands.add_parser(
+        "train-t1",
+        help="Train the T1 shared model on the real train split and save one bundle",
+        allow_abbrev=False,
+    )
+    train_t1.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path for the saved T1 model bundle",
+    )
+    train_t1.add_argument(
+        "--C",
+        type=float,
+        default=1.0,
+        help="Logistic regression inverse regularization strength (default: 1.0)",
+    )
+    train_t1.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    train_t1.add_argument(
+        "--split-file",
+        type=Path,
+        default=None,
+        help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
+    )
     return parser
 
 
@@ -232,6 +262,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_diagnose_frequency_baseline(args)
     if args.command == "evaluate-predictions":
         return run_evaluate_predictions(args)
+    if args.command == "train-t1":
+        return _run_train_t1(args)
     parser.print_help()
     return 0
 
