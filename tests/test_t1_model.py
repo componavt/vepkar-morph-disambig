@@ -164,6 +164,29 @@ class TestTraining:
         with pytest.raises(ValueError):
             train_candidate_model(raising_examples(), C=0.0)
 
+    def test_empty_features_reach_existing_vectorizer(self):
+        examples = [
+            make_example({}, label=1, weight=0.5),
+            make_example({}, label=0, weight=0.5),
+        ]
+        with pytest.raises(ValueError) as exc:
+            train_candidate_model(examples)
+        assert "feature" in str(exc.value)
+
+    def test_user_warning_delegates_to_original_fit(self, monkeypatch):
+        pos = make_example(dict(POS_FEATURES), label=1, weight=0.5)
+        neg = make_example(dict(NEG_FEATURES), label=0, weight=1.0)
+        real_fit = LogisticRegression.fit
+
+        def warning_fit(self, X, y, sample_weight=None):
+            warnings.warn("custom user warning", UserWarning)
+            return real_fit(self, X, y, sample_weight=sample_weight)
+
+        monkeypatch.setattr(LogisticRegression, "fit", warning_fit)
+        with pytest.warns(UserWarning, match="custom user warning"):
+            model = train_candidate_model([pos, neg])
+        assert isinstance(model, T1Model)
+
     def test_convergence_warning_raises(self, monkeypatch):
         pos = make_example(dict(POS_FEATURES), label=1, weight=0.5)
         neg = make_example(dict(NEG_FEATURES), label=0, weight=1.0)
@@ -174,8 +197,11 @@ class TestTraining:
             return real_fit(self, X, y, sample_weight=sample_weight)
 
         monkeypatch.setattr(LogisticRegression, "fit", warning_fit)
-        with pytest.raises(ConvergenceWarning):
-            train_candidate_model([pos, neg])
+        with warnings.catch_warnings():
+            filters_before = list(warnings.filters)
+            with pytest.raises(ConvergenceWarning):
+                train_candidate_model([pos, neg])
+            assert warnings.filters == filters_before
 
 
 class TestScoring:

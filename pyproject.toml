@@ -5,7 +5,7 @@ description = "Ranking candidate morphological analyses of words in VepKar conte
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["numpy", "pandas", "zstandard", "scikit-learn", "scipy"]
+dependencies = ["numpy", "pandas", "zstandard", "scikit-learn", "scipy", "joblib"]
 
 [project.optional-dependencies]
 dev = ["pytest"]

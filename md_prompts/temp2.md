@@ -1,45 +1,34 @@
 iw
 
 ```
-T1.1a
-  pure feature/example construction
-  + автономные tests
-        │
-        ▼
-T1.1b
-  train
-  + model bundle persistence
-        │
-        ▼
-T1.1c
-  dev predictions CLI
-  + existing validation/evaluation
-        │
-        ▼
-T1.1d
-  C = 0.1 / 1 / 10
-  + selection on dev
-  + result bundle
+T1.1a ✅
+    │
+    ▼
+T1.1b — научиться оценивать кандидатов
+    │
+    ▼
+T1.1c — получить реальные dev predictions
+    │
+    ▼
+T1.1d — выбрать настройки и зафиксировать результат
 ```
 
 ```
-T1.1a
-│
-├─ a1  «Признаки»       Что известно об одном кандидате?
-│          │
-├─ a2  «Контекст»       Какие слова стоят слева и справа?
-│          │
-├─ a3  «Сборка»         Как получить CandidateExample?
-│          │
-└─ a4  «Приёмка»        Весь контракт действительно соблюдён?
-           │
-           ▼
-         T1.1b — обучение
+Готовые CandidateExample ✅
+             │
+             ▼
+ T1.1b1 — vectorizer
+             │
+             ▼
+ T1.1b2 — train + scores в памяти
+             │
+             ▼
+ T1.1b3 — save / load model bundle
+             │
+             ▼
+ T1.1b4 — сквозная приёмка
+             │
+             ▼
+ T1.1c — реальные dev predictions через CLI
 ```
-T1.1a1 — типы и построение признаков одного кандидата
-T1.1a2 — разрешение контекста и его ошибки
-T1.1a3 — сборка CandidateExample и режимы train/predict
-T1.1a4 — приёмка полного контракта
 
-Implement T1.1a2 context resolution
-Implement T1.1a3 CandidateExample assembly
