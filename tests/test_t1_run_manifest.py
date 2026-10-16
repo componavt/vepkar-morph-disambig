@@ -32,9 +32,17 @@ from t1_features.run_manifest import (  # noqa: E402
     write_run_manifest,
 )
 
-GIT_AVAILABLE = (
-    subprocess.run(["git", "--version"], capture_output=True).returncode == 0
-)
+def _git_available() -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "--version"], capture_output=True, text=True
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+GIT_AVAILABLE = _git_available()
 
 _SPLIT_CONTENT = "language,text_id,split\nvep,1,dev\nvep,2,train\nkrl,1,dev\n"
 
@@ -42,6 +50,47 @@ _WARNING = (
     "Recorded local changes; commit IDs alone do not identify\n"
     "the exact executed code/data. Review changes before the experiment."
 )
+
+
+class _WriteAndCloseFailingStream:
+    def __init__(self, stream, write_error, close_error):
+        self._stream = stream
+        self._write_error = write_error
+        self._close_error = close_error
+
+    def write(self, text):
+        raise self._write_error
+
+    def close(self):
+        self._stream.close()
+        raise self._close_error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
+
+
+class _CloseFailingStream:
+    def __init__(self, stream, close_error):
+        self._stream = stream
+        self._close_error = close_error
+
+    def write(self, text):
+        return self._stream.write(text)
+
+    def close(self):
+        self._stream.close()
+        raise self._close_error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+        return False
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -659,6 +708,139 @@ class TestPublication:
         assert sorted(p.name for p in tmp_path.iterdir()) == []
 
 
+class TestWriteFailureLifecycle:
+    def test_fdopen_failure_closes_descriptor_once_and_removes_temp(
+        self, tmp_path, monkeypatch
+    ):
+        output = tmp_path / "run.json"
+        original_close = os.close
+        captured = {}
+        close_calls = []
+
+        def failing_fdopen(fd, *args, **kwargs):
+            captured["descriptor"] = fd
+            raise OSError("simulated stream open denial")
+
+        def recording_close(fd):
+            close_calls.append(fd)
+            return original_close(fd)
+
+        monkeypatch.setattr(run_manifest.os, "fdopen", failing_fdopen)
+        monkeypatch.setattr(run_manifest.os, "close", recording_close)
+        try:
+            with pytest.raises(RunManifestError) as exc_info:
+                write_run_manifest(_stable_manifest(), output)
+            assert "simulated stream open denial" in str(exc_info.value.__cause__)
+            assert isinstance(exc_info.value.__cause__, OSError)
+            assert not output.exists()
+            descriptor = captured["descriptor"]
+            assert close_calls.count(descriptor) == 1
+            with pytest.raises(OSError):
+                os.fstat(descriptor)
+            assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
+        finally:
+            descriptor = captured.get("descriptor")
+            if descriptor is not None:
+                try:
+                    os.fstat(descriptor)
+                except OSError:
+                    pass
+                else:
+                    original_close(descriptor)
+            for leftover in tmp_path.glob(".vepkar-t1-run-*.tmp"):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+
+    def test_write_and_close_failure_keeps_write_cause_and_notes_close(
+        self, tmp_path, monkeypatch
+    ):
+        output = tmp_path / "run.json"
+        original_fdopen = os.fdopen
+        original_link = os.link
+        write_error = OSError("simulated write denial")
+        close_error = OSError("simulated close denial")
+        link_calls = []
+
+        def wrapping_fdopen(fd, *args, **kwargs):
+            stream = original_fdopen(fd, *args, **kwargs)
+            return _WriteAndCloseFailingStream(stream, write_error, close_error)
+
+        def recording_link(source, destination):
+            link_calls.append((source, destination))
+            return original_link(source, destination)
+
+        monkeypatch.setattr(run_manifest.os, "fdopen", wrapping_fdopen)
+        monkeypatch.setattr(run_manifest.os, "link", recording_link)
+        with pytest.raises(RunManifestError) as exc_info:
+            write_run_manifest(_stable_manifest(), output)
+        assert exc_info.value.__cause__ is write_error
+        assert "simulated write denial" in str(exc_info.value)
+        notes = getattr(exc_info.value, "__notes__", ())
+        assert any("simulated close denial" in note for note in notes)
+        assert link_calls == []
+        assert not output.exists()
+        assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
+
+    def test_close_failure_after_successful_write_never_publishes(
+        self, tmp_path, monkeypatch
+    ):
+        output = tmp_path / "run.json"
+        original_fdopen = os.fdopen
+        original_link = os.link
+        close_error = OSError("simulated close denial")
+        link_calls = []
+
+        def wrapping_fdopen(fd, *args, **kwargs):
+            stream = original_fdopen(fd, *args, **kwargs)
+            return _CloseFailingStream(stream, close_error)
+
+        def recording_link(source, destination):
+            link_calls.append((source, destination))
+            return original_link(source, destination)
+
+        monkeypatch.setattr(run_manifest.os, "fdopen", wrapping_fdopen)
+        monkeypatch.setattr(run_manifest.os, "link", recording_link)
+        with pytest.raises(RunManifestError) as exc_info:
+            write_run_manifest(_stable_manifest(), output)
+        assert exc_info.value.__cause__ is close_error
+        assert "simulated close denial" in str(exc_info.value)
+        assert link_calls == []
+        assert not output.exists()
+        assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
+
+    def test_non_oserror_write_failure_survives_close_failure(
+        self, tmp_path, monkeypatch
+    ):
+        output = tmp_path / "run.json"
+        original_fdopen = os.fdopen
+        original_link = os.link
+        write_error = RuntimeError("simulated encoding denial")
+        close_error = OSError("simulated close denial")
+        link_calls = []
+
+        def wrapping_fdopen(fd, *args, **kwargs):
+            stream = original_fdopen(fd, *args, **kwargs)
+            return _WriteAndCloseFailingStream(stream, write_error, close_error)
+
+        def recording_link(source, destination):
+            link_calls.append((source, destination))
+            return original_link(source, destination)
+
+        monkeypatch.setattr(run_manifest.os, "fdopen", wrapping_fdopen)
+        monkeypatch.setattr(run_manifest.os, "link", recording_link)
+        with pytest.raises(RuntimeError) as exc_info:
+            write_run_manifest(_stable_manifest(), output)
+        assert exc_info.value is write_error
+        assert not isinstance(exc_info.value, RunManifestError)
+        notes = getattr(exc_info.value, "__notes__", ())
+        assert any("simulated close denial" in note for note in notes)
+        assert link_calls == []
+        assert not output.exists()
+        assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
+
+
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestEndToEndSideEffects:
     def test_publication_leaves_only_json_and_inputs_unchanged(self, tmp_path, capsys):
@@ -697,3 +879,77 @@ class TestEndToEndSideEffects:
         }
         assert after_files == data_files
         assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
+
+
+class TestGitAvailabilityHelper:
+    def test_reports_true_for_successful_git(self):
+        if not GIT_AVAILABLE:
+            pytest.skip("Git unavailable")
+        assert _git_available() is True
+
+    def test_reports_false_for_nonzero_status(self, monkeypatch):
+        def nonzero_run(command, *args, **kwargs):
+            return subprocess.CompletedProcess(
+                args=command, returncode=2, stdout="", stderr=""
+            )
+
+        monkeypatch.setattr(subprocess, "run", nonzero_run)
+        assert _git_available() is False
+
+    @pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
+    def test_reports_false_for_launch_failure(self, monkeypatch, error):
+        def raising_run(command, *args, **kwargs):
+            raise error("simulated missing git")
+
+        monkeypatch.setattr(subprocess, "run", raising_run)
+        assert _git_available() is False
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+@pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
+class TestGitLaunchFailure:
+    def test_launch_failure_wrapped_with_root_operation_and_cause(
+        self, tmp_path, monkeypatch, error
+    ):
+        code = _valid_code_repo(tmp_path)
+        data = _tagged_data_repo(tmp_path)
+        split = _split_file(tmp_path)
+
+        def raising_run(command, *args, **kwargs):
+            raise error("simulated git launch denial")
+
+        monkeypatch.setattr(subprocess, "run", raising_run)
+        with pytest.raises(RunManifestError) as exc_info:
+            _collect(code, data, split)
+        message = str(exc_info.value)
+        assert "cannot run Git" in message
+        assert str(code) in message
+        assert "rev-parse" in message
+        assert "simulated git launch denial" in message
+        assert isinstance(exc_info.value.__cause__, error)
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+class TestNonMutatingGitObservation:
+    def test_production_git_calls_carry_no_optional_locks_option(
+        self, tmp_path, monkeypatch
+    ):
+        code = _valid_code_repo(tmp_path)
+        data = _tagged_data_repo(tmp_path)
+        split = _split_file(tmp_path)
+        original_run = subprocess.run
+        invocations = []
+
+        def spy_run(command, *args, **kwargs):
+            invocations.append(command)
+            return original_run(command, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", spy_run)
+        manifest = _collect(code, data, split)
+        assert manifest["code"]["dirty"] is False
+        git_calls = [cmd for cmd in invocations if cmd and cmd[0] == "git"]
+        assert git_calls
+        for command in git_calls:
+            assert command[1] == "--no-optional-locks"
+            assert command[2] == "-C"
+            assert str(code) in command or str(data) in command

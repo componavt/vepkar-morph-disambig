@@ -52,15 +52,18 @@ def _current_environment() -> dict[str, str]:
 
 
 def _git(root: Path, *args: str) -> str:
+    command = ["git", "--no-optional-locks", "-C", str(root), *args]
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args],
+            command,
             capture_output=True,
             text=True,
             check=True,
         )
-    except FileNotFoundError as exc:
-        raise RunManifestError(f"cannot run Git for {root}: {exc}") from exc
+    except OSError as exc:
+        raise RunManifestError(
+            f"cannot run Git for {root}: git {' '.join(args)}: {exc}"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         detail = exc.stderr.strip() or str(exc)
         raise RunManifestError(
@@ -176,12 +179,50 @@ def write_run_manifest(manifest: dict, output_path: Path) -> None:
     temp_path = Path(temp_name)
     try:
         try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as fh:
-                fh.write(text)
+            stream = os.fdopen(descriptor, "w", encoding="utf-8")
         except OSError as exc:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
             raise RunManifestError(
-                f"cannot write run passport {output_path}: write temporary "
+                f"cannot write run passport {output_path}: open temporary "
                 f"file {temp_path}: {exc}"
+            ) from exc
+        write_failed = False
+        try:
+            with stream:
+                try:
+                    stream.write(text)
+                except BaseException:
+                    write_failed = True
+                    raise
+        except OSError as exc:
+            if not write_failed:
+                raise RunManifestError(
+                    f"cannot write run passport {output_path}: close "
+                    f"temporary file {temp_path}: {exc}"
+                ) from exc
+            primary = exc.__context__
+            if primary is not None and not isinstance(primary, OSError):
+                primary.add_note(
+                    f"failed to close temporary run passport stream "
+                    f"{temp_path}: {exc}"
+                )
+                raise primary
+            if primary is not None:
+                error = RunManifestError(
+                    f"cannot write run passport {output_path}: write "
+                    f"temporary file {temp_path}: {primary}"
+                )
+                error.add_note(
+                    f"failed to close temporary run passport stream "
+                    f"{temp_path}: {exc}"
+                )
+                raise error from primary
+            raise RunManifestError(
+                f"cannot write run passport {output_path}: write "
+                f"temporary file {temp_path}: {exc}"
             ) from exc
         try:
             os.link(temp_path, output_path)
