@@ -373,10 +373,53 @@ class TestRollback:
             p.name in {"foreign.txt", "run-a"} for p in (tmp_path / "runs").iterdir()
         )
 
+    def test_actual_final_directory_creation_collision(
+        self, tmp_path, monkeypatch
+    ):
+        config = _config(tmp_path)
+        _default_split(config.repo_root)
+        target = tmp_path / "runs" / "run-collision"
+        marker = b"foreign marker bytes before the passport\n"
+        original_mkdir = Path.mkdir
+        staged = False
+
+        def colliding_mkdir(self, *args, **kwargs):
+            nonlocal staged
+            if "parents" not in kwargs and self == target and not staged:
+                staged = True
+                original_mkdir(self, *args, **kwargs)
+                (self / "marker.bin").write_bytes(marker)
+                original_mkdir(self, *args, **kwargs)
+            return original_mkdir(self, *args, **kwargs)
+
+        writer_calls = []
+        original_write = workspace.write_run_manifest
+
+        def recording_write(manifest, output_path):
+            writer_calls.append(output_path)
+            return original_write(manifest, output_path)
+
+        monkeypatch.setattr(Path, "mkdir", colliding_mkdir)
+        monkeypatch.setattr(workspace, "write_run_manifest", recording_write)
+        with pytest.raises(T1WorkspaceError) as exc_info:
+            create_t1_run(config, run_dir=target)
+        error = exc_info.value
+        assert str(target) in str(error)
+        assert "already exists" in str(error)
+        assert "concurrent" in str(error)
+        assert isinstance(error.__cause__, FileExistsError)
+        assert target.is_dir()
+        assert (target / "marker.bin").read_bytes() == marker
+        assert sorted(p.name for p in target.iterdir()) == ["marker.bin"]
+        assert not (target / "run.json").exists()
+        assert writer_calls == []
+
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestNoSideEffects:
-    def test_inputs_unchanged_and_no_table_loading_or_output(self, tmp_path, monkeypatch):
+    def test_inputs_unchanged_and_no_table_loading_or_output(
+        self, tmp_path, monkeypatch, capsys
+    ):
         def forbidden(lang, data_dir):
             raise AssertionError("corpus tables must not be loaded")
 
@@ -398,7 +441,11 @@ class TestNoSideEffects:
             if path.is_file()
         }
         config = load_t1_config(code, data_dir=data, runs_dir=tmp_path / "runs")
+        capsys.readouterr()
         created = create_t1_run(config)
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
         assert split.read_bytes() == split_before
         assert {
             path.relative_to(data): path.read_bytes()

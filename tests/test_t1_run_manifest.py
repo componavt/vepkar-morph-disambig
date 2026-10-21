@@ -41,6 +41,7 @@ def _git_available() -> bool:
 GIT_AVAILABLE = _git_available()
 
 _SPLIT_CONTENT = "language,text_id,split\nvep,1,dev\nvep,2,train\nkrl,1,dev\n"
+_TAG = "v2026.09"
 
 _WARNING = (
     "Recorded local changes; commit IDs alone do not identify\n"
@@ -150,6 +151,23 @@ def _split_file(
     return path
 
 
+def _default_split(code_root: Path, content: str = _SPLIT_CONTENT) -> Path:
+    path = code_root / "data" / "derived" / f"splits_{_TAG}.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    _commit_all(code_root)
+    return path
+
+
+def _created_run_dir(captured) -> Path:
+    run_line = next(
+        line
+        for line in captured.out.splitlines()
+        if line.startswith("Run directory: ")
+    )
+    return Path(run_line.split(": ", 1)[1])
+
+
 def _stable_manifest() -> dict:
     return {
         "format": "vepkar-t1-run",
@@ -188,18 +206,26 @@ def test_run_manifest_error_is_value_error():
     assert RunManifestError is not ValueError
 
 
-def test_parser_wires_prepare_t1_run_arguments(tmp_path):
+def test_parser_defaults_and_explicit_prepare_t1_run_arguments(tmp_path):
     from cli import build_parser
 
     parser = build_parser()
-    output = tmp_path / "run.json"
+    args = parser.parse_args(["prepare-t1-run"])
+    assert args.command == "prepare-t1-run"
+    assert args.run_dir is None
+    assert args.C == 1.0
+    assert args.data_dir is None
+    assert args.split_file is None
+    assert not hasattr(args, "output")
+
+    run_dir = tmp_path / "runs" / "run-a"
     data = tmp_path / "data"
     split = _split_file(tmp_path)
     args = parser.parse_args(
         [
             "prepare-t1-run",
-            "--output",
-            str(output),
+            "--run-dir",
+            str(run_dir),
             "--C",
             "2.5",
             "--data-dir",
@@ -208,11 +234,34 @@ def test_parser_wires_prepare_t1_run_arguments(tmp_path):
             str(split),
         ]
     )
-    assert args.command == "prepare-t1-run"
-    assert args.output == output
+    assert args.run_dir == run_dir
     assert args.C == 2.5
     assert args.data_dir == data
     assert args.split_file == split
+
+
+@pytest.mark.parametrize("option", ["--output", "--runs-dir"])
+def test_prepare_t1_run_rejects_removed_output_and_runs_dir(option, tmp_path):
+    from cli import build_parser
+
+    parser = build_parser()
+    target = tmp_path / "run.json"
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["prepare-t1-run", option, str(target)])
+    assert excinfo.value.code == 2
+
+
+def test_prepare_t1_run_help_describes_optional_run_dir(capsys):
+    from cli import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit) as excinfo:
+        parser.parse_args(["prepare-t1-run", "--help"])
+    assert excinfo.value.code == 0
+    captured = capsys.readouterr()
+    assert "--run-dir" in captured.out
+    assert "--output" not in captured.out
+    assert "--runs-dir" not in captured.out
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
@@ -362,9 +411,8 @@ class TestRepoIsolation:
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestPrepareT1RunCommand:
-    def test_cli_success_with_tiny_tagged_data_and_no_table_loading(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    @staticmethod
+    def _guard_tables(monkeypatch):
         def forbidden(lang, data_dir):
             raise AssertionError("corpus tables must not be loaded")
 
@@ -373,214 +421,287 @@ class TestPrepareT1RunCommand:
             benchmark_context, "build_language_instances", forbidden
         )
 
+    def test_cli_automatic_creation_with_published_split_and_missing_toml_notice(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._guard_tables(monkeypatch)
+        code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
-        split = _split_file(tmp_path)
-        output = tmp_path / "run.json"
+        split = _default_split(code)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
+
         status = cli.main(
-            [
-                "prepare-t1-run",
-                "--output",
-                str(output),
-                "--C",
-                "0.5",
-                "--data-dir",
-                str(data),
-                "--split-file",
-                str(split),
-            ]
+            ["prepare-t1-run", "--C", "0.5", "--data-dir", str(data)]
         )
         captured = capsys.readouterr()
         assert status == 0, captured.err
-        assert "T1 run metadata prepared" in captured.out
-        assert f"Run passport: {output}" in captured.out
-        code_commit = _git(ROOT, "rev-parse", "HEAD").stdout.strip()
-        data_commit = _git(data, "rev-parse", "HEAD").stdout.strip()
-        assert f"Code commit: {code_commit}" in captured.out
+        notice = (
+            "Local configuration not found: "
+            f"{code / 't1.local.toml'}; using defaults and explicit overrides."
+        )
+        assert captured.err.count(notice) == 1
+        assert "Recorded local changes" not in captured.err
+        assert "T1 run prepared" in captured.out
+        created = _created_run_dir(captured)
+        assert f"Run directory: {created}" in captured.out
+        assert created.parent == code / "work" / "runs"
+        assert created.is_absolute()
+        assert created.is_dir()
+        assert sorted(p.name for p in created.iterdir()) == ["run.json"]
+        manifest = load_run_manifest(created / "run.json")
+        assert manifest["data"]["root"] == str(data)
+        assert manifest["data"]["tag"] == _TAG
+        assert manifest["data"]["dirty"] is False
+        assert manifest["code"]["dirty"] is False
+        assert manifest["split"]["path"] == str(split.resolve())
+        assert manifest["split"]["sha256"] == hashlib.sha256(
+            split.read_bytes()
+        ).hexdigest()
+        assert manifest["parameters"] == {"C": 0.5, "target_split": "dev"}
+        code_commit = _git(code, "rev-parse", "HEAD").stdout.strip()
+        assert manifest["code"]["commit"] == code_commit
+        assert manifest["code"]["root"] == str(code)
         assert "Data tag: v2026.09" in captured.out
-        assert f"Data commit: {data_commit}" in captured.out
-        expected_sha256 = hashlib.sha256(split.read_bytes()).hexdigest()
-        assert f"Split SHA-256: {expected_sha256}" in captured.out
         assert "C: 0.5" in captured.out
         assert "Target split: dev" in captured.out
         assert "error:" not in captured.err
         assert "Traceback" not in captured.err
         assert "Traceback" not in captured.out
 
-        manifest = json.loads(output.read_text(encoding="utf-8"))
-        assert manifest["format"] == "vepkar-t1-run"
-        assert manifest["format_version"] == 2
-        assert manifest["stage"] == "prepared"
-        assert manifest["code"]["root"] == str(ROOT)
-        assert manifest["code"]["commit"] == code_commit
-        assert manifest["data"] == {
-            "root": str(data.resolve()),
-            "tag": "v2026.09",
-            "commit": data_commit,
-            "status_porcelain": "",
-            "dirty": False,
-        }
-        assert manifest["split"] == {
-            "path": str(split.resolve()),
-            "sha256": expected_sha256,
-        }
-        assert manifest["parameters"] == {"C": 0.5, "target_split": "dev"}
-        load_run_manifest(output)
-        assert json.loads(output.read_text(encoding="utf-8")) == manifest
+    def test_cli_toml_paths_with_explicit_overrides_precedence(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        code = _valid_code_repo(tmp_path)
+        data_toml = _tagged_data_repo(tmp_path, name="data-toml")
+        data_cli = _tagged_data_repo(tmp_path, name="data-cli")
+        split_toml = _split_file(tmp_path, "split-toml.csv")
+        split_cli = _split_file(tmp_path, "split-cli.csv")
+        (code / "t1.local.toml").write_text(
+            "[paths]\n"
+            f'data_dir = "{data_toml}"\n'
+            'runs_dir = "toml-runs"\n'
+            f'split_file = "{split_toml}"\n',
+            encoding="utf-8",
+        )
+        _commit_all(code, "configure")
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
 
-    def test_missing_split_file_fails_without_output(self, tmp_path, capsys):
-        data = _tagged_data_repo(tmp_path)
-        missing = tmp_path / "missing-splits.csv"
-        output = tmp_path / "run.json"
         status = cli.main(
             [
                 "prepare-t1-run",
-                "--output",
-                str(output),
-                "--C",
-                "1.0",
+                "--data-dir",
+                str(data_cli),
+                "--split-file",
+                str(split_cli),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        assert captured.err == ""
+        created = _created_run_dir(captured)
+        assert created.parent == code / "toml-runs"
+        manifest = load_run_manifest(created / "run.json")
+        assert manifest["data"]["root"] == str(data_cli)
+        assert manifest["data"]["tag"] == _TAG
+        assert manifest["split"]["path"] == str(split_cli.resolve())
+        assert manifest["split"]["path"] != str(split_toml.resolve())
+
+    def test_cli_explicit_new_nested_run_directory(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        code = _valid_code_repo(tmp_path)
+        data = _tagged_data_repo(tmp_path)
+        _default_split(code)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
+        run_dir = tmp_path / "nested" / "runs" / "run-a"
+        status = cli.main(
+            [
+                "prepare-t1-run",
+                "--run-dir",
+                str(run_dir),
                 "--data-dir",
                 str(data),
-                "--split-file",
-                str(missing),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        assert f"Run directory: {run_dir}" in captured.out
+        assert run_dir.is_dir()
+        assert sorted(p.name for p in run_dir.iterdir()) == ["run.json"]
+        assert load_run_manifest(run_dir / "run.json")["parameters"]["C"] == 1.0
+
+    def test_cli_existing_final_run_path_refused(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        code = _valid_code_repo(tmp_path)
+        data = _tagged_data_repo(tmp_path)
+        _default_split(code)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
+        existing = tmp_path / "existing" / "run"
+        existing.mkdir(parents=True)
+        (existing / "keep.txt").write_text("keep\n", encoding="utf-8")
+        status = cli.main(
+            [
+                "prepare-t1-run",
+                "--run-dir",
+                str(existing),
+                "--data-dir",
+                str(data),
             ]
         )
         captured = capsys.readouterr()
         assert status == 1
-        assert "cannot read split file" in captured.err
-        assert str(missing) in captured.err
-        assert not output.exists()
-        assert "T1 run metadata prepared" not in captured.out
-        assert "Traceback" not in captured.err
+        assert str(existing) in captured.err
+        assert "already exists" in captured.err
+        assert (existing / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+        assert not (existing / "run.json").exists()
+        assert "T1 run prepared" not in captured.out
 
-    def test_data_dir_without_git_repo_fails(self, tmp_path, capsys):
+    def test_cli_data_dir_without_git_repo_fails(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        code = _valid_code_repo(tmp_path)
+        _default_split(code)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
         data = tmp_path / "not-a-repo"
         (data / "corpus").mkdir(parents=True)
         (data / "corpus" / "x.txt").write_text("x", encoding="utf-8")
-        split = _split_file(tmp_path)
-        output = tmp_path / "run.json"
-        status = cli.main(
-            [
-                "prepare-t1-run",
-                "--output",
-                str(output),
-                "--C",
-                "1.0",
-                "--data-dir",
-                str(data),
-                "--split-file",
-                str(split),
-            ]
-        )
+        status = cli.main(["prepare-t1-run", "--data-dir", str(data)])
         captured = capsys.readouterr()
         assert status == 1
         assert "Could not read the dictorpus-data checkout tag" in captured.err
         assert str(data) in captured.err
-        assert not output.exists()
+        assert not (code / "work" / "runs").exists()
+        assert "T1 run prepared" not in captured.out
+        assert "Traceback" not in captured.err
+
+    def test_cli_missing_published_split_fails(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        code = _valid_code_repo(tmp_path)
+        data = _tagged_data_repo(tmp_path)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
+        status = cli.main(["prepare-t1-run", "--data-dir", str(data)])
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "cannot read split file" in captured.err
+        published = code / "data" / "derived" / f"splits_{_TAG}.csv"
+        assert str(published) in captured.err
+        assert not (code / "work" / "runs").exists()
+        assert "T1 run prepared" not in captured.out
+        assert "Traceback" not in captured.err
+
+    def test_cli_bad_configuration_rejected(self, tmp_path, monkeypatch, capsys):
+        code = _valid_code_repo(tmp_path)
+        (code / "t1.local.toml").write_text(
+            '[paths]\nunknown_key = "x"\n', encoding="utf-8"
+        )
+        _commit_all(code, "bad config")
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
+        status = cli.main(["prepare-t1-run"])
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "Invalid T1 local configuration" in captured.err
+        assert str(code / "t1.local.toml") in captured.err
+        assert not (code / "work" / "runs").exists()
+        assert "T1 run prepared" not in captured.out
         assert "Traceback" not in captured.err
 
     @pytest.mark.parametrize("C", [0.0, -1.0, float("nan"), float("inf")])
-    def test_invalid_C_rejected_before_any_work(self, tmp_path, capsys, C):
-        output = tmp_path / "run.json"
+    def test_handler_invalid_C_rejected_before_configuration_or_creation(
+        self, monkeypatch, capsys, C
+    ):
+        def forbidden(*args, **kwargs):
+            pytest.fail("no configuration or creation work is allowed")
+
+        monkeypatch.setattr(prepare_pkg, "load_t1_config", forbidden)
+        monkeypatch.setattr(prepare_pkg, "create_t1_run", forbidden)
         status = prepare_pkg._run_prepare_t1_run(
-            argparse.Namespace(
-                C=C, output=output, data_dir=None, split_file=None
-            )
+            argparse.Namespace(C=C, run_dir=None, data_dir=None, split_file=None)
         )
         captured = capsys.readouterr()
         assert status == 1
         assert "C must be finite and positive" in captured.err
-        assert not output.exists()
+        assert "T1 run prepared" not in captured.out
+        assert "Run directory:" not in captured.out
 
-    def test_existing_destination_protected(self, tmp_path, capsys):
-        output = tmp_path / "run.json"
-        output.write_text("original\n", encoding="utf-8")
-        status = prepare_pkg._run_prepare_t1_run(
-            argparse.Namespace(
-                C=1.0, output=output, data_dir=None, split_file=None
-            )
-        )
+    def test_cli_dirty_trees_warn_without_rejecting(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        code = _valid_code_repo(tmp_path)
+        data = _tagged_data_repo(tmp_path)
+        _default_split(code)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
+        (code / "README.md").write_text("changed\n", encoding="utf-8")
+        (data / "new.txt").write_text("untracked\n", encoding="utf-8")
+
+        status = cli.main(["prepare-t1-run", "--data-dir", str(data)])
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        assert _WARNING in captured.err
+        assert "T1 run prepared" in captured.out
+        assert load_run_manifest(_created_run_dir(captured) / "run.json")
+
+    def test_cli_passport_reread_failure_reports_created_run(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        code = _valid_code_repo(tmp_path)
+        data = _tagged_data_repo(tmp_path)
+        _default_split(code)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
+
+        def failing_load(path):
+            raise RunManifestError("distinctive reread explanation")
+
+        monkeypatch.setattr(prepare_pkg, "load_run_manifest", failing_load)
+        status = cli.main(["prepare-t1-run", "--data-dir", str(data)])
         captured = capsys.readouterr()
         assert status == 1
-        assert "already exists" in captured.err
-        assert output.read_text(encoding="utf-8") == "original\n"
-
-    def test_dangling_symlink_destination_protected(self, tmp_path, capsys):
-        output = tmp_path / "run.json"
-        missing = tmp_path / "missing.json"
-        try:
-            output.symlink_to(missing)
-        except (OSError, NotImplementedError):
-            pytest.skip("Symlink creation is unavailable in this environment")
-        status = prepare_pkg._run_prepare_t1_run(
-            argparse.Namespace(
-                C=1.0, output=output, data_dir=None, split_file=None
-            )
-        )
-        captured = capsys.readouterr()
-        assert status == 1
-        assert "already exists" in captured.err
-        assert output.is_symlink()
-        assert output.readlink() == missing
-        assert not missing.exists()
-
-    def test_missing_parent_not_created(self, tmp_path, capsys):
-        output = tmp_path / "no-such-dir" / "run.json"
-        status = prepare_pkg._run_prepare_t1_run(
-            argparse.Namespace(
-                C=1.0, output=output, data_dir=None, split_file=None
-            )
-        )
-        captured = capsys.readouterr()
-        assert status == 1
-        assert "output directory does not exist" in captured.err
-        assert str(output.parent) in captured.err
-        assert not (tmp_path / "no-such-dir").exists()
+        assert "distinctive reread explanation" in captured.err
+        runs = code / "work" / "runs"
+        assert runs.is_dir()
+        created = next(path for path in runs.iterdir())
+        assert str(created) in captured.err
+        assert "T1 run prepared" not in captured.out
+        assert "Run directory:" not in captured.out
+        assert (created / "run.json").is_file()
+        load_run_manifest(created / "run.json")
+        assert sorted(p.name for p in created.iterdir()) == ["run.json"]
 
 
 class TestDirtyWarning:
     @staticmethod
     def _run(tmp_path, monkeypatch, capsys, dirty: bool):
-        manifest = _stable_manifest()
+        code = _valid_code_repo(tmp_path, name="code-warn")
+        data = _tagged_data_repo(tmp_path, name="data-warn")
+        _default_split(code)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
         if dirty:
-            manifest["code"]["dirty"] = True
-            manifest["code"]["status_porcelain"] = " M src/one.py"
-            manifest["data"]["dirty"] = True
-            manifest["data"]["status_porcelain"] = "?? new.txt"
-        output = tmp_path / "run.json"
-        monkeypatch.setattr(
-            prepare_pkg,
-            "collect_run_manifest",
-            lambda manifest=manifest, **kwargs: manifest,
-        )
-        monkeypatch.setattr(
-            prepare_pkg,
-            "_preflight_benchmark",
-            lambda data_dir: (data_dir, "v2026.09"),
-        )
+            (code / "README.md").write_text("changed\n", encoding="utf-8")
+            (data / "new.txt").write_text("untracked\n", encoding="utf-8")
         status = prepare_pkg._run_prepare_t1_run(
             argparse.Namespace(
-                C=1.0,
-                output=output,
-                data_dir=tmp_path,
-                split_file=tmp_path / "splits.csv",
+                C=1.0, run_dir=None, data_dir=data, split_file=None
             )
         )
-        return status, output, capsys.readouterr()
+        captured = capsys.readouterr()
+        created = _created_run_dir(captured)
+        return status, created, captured
 
     def test_clean_trees_record_without_warning(self, tmp_path, monkeypatch, capsys):
-        status, output, captured = self._run(
+        status, created, captured = self._run(
             tmp_path, monkeypatch, capsys, dirty=False
         )
         assert status == 0, captured.err
-        assert output.is_file()
+        assert (created / "run.json").is_file()
         assert _WARNING not in captured.err
 
     def test_dirty_trees_warn_on_stderr(self, tmp_path, monkeypatch, capsys):
-        status, output, captured = self._run(
+        status, created, captured = self._run(
             tmp_path, monkeypatch, capsys, dirty=True
         )
         assert status == 0, captured.err
-        assert output.is_file()
+        assert (created / "run.json").is_file()
         assert _WARNING in captured.err
 
 
@@ -827,34 +948,39 @@ class TestWriteFailureLifecycle:
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestEndToEndSideEffects:
-    def test_publication_leaves_only_json_and_inputs_unchanged(self, tmp_path, capsys):
+    def test_publication_leaves_only_json_and_inputs_unchanged(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
-        split = _split_file(tmp_path)
-        output = tmp_path / "run.json"
+        split = _default_split(code)
+        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
         split_before = split.read_bytes()
         data_files = {
             path.relative_to(data): path.read_bytes()
             for path in data.rglob("*")
             if path.is_file()
         }
+        code_files = {
+            path.relative_to(code): path.read_bytes()
+            for path in code.rglob("*")
+            if path.is_file()
+        }
         before = {path.name for path in tmp_path.iterdir()}
         status = cli.main(
             [
                 "prepare-t1-run",
-                "--output",
-                str(output),
                 "--C",
                 "1.0",
                 "--data-dir",
                 str(data),
-                "--split-file",
-                str(split),
             ]
         )
         captured = capsys.readouterr()
         assert status == 0, captured.err
+        created = _created_run_dir(captured)
         after = {path.name for path in tmp_path.iterdir()}
-        assert after == before | {"run.json"}
+        assert after == before
         assert split.read_bytes() == split_before
         after_files = {
             path.relative_to(data): path.read_bytes()
@@ -862,7 +988,18 @@ class TestEndToEndSideEffects:
             if path.is_file()
         }
         assert after_files == data_files
+        after_code_files = {
+            path.relative_to(code): path.read_bytes()
+            for path in code.rglob("*")
+            if path.is_file()
+        }
+        for relative, content in code_files.items():
+            assert after_code_files[relative] == content
+        assert set(after_code_files) - set(code_files) == {
+            created.relative_to(code) / "run.json"
+        }
         assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
+        assert (created / "run.json").is_file()
 
 
 class TestGitAvailabilityHelper:

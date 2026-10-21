@@ -7,14 +7,9 @@ import math
 import sys
 from pathlib import Path
 
-from benchmark_context import _preflight_benchmark
-from core.data import DataError
-from core.instances import CorpusTagError
-from t1_features.run_manifest import (
-    RunManifestError,
-    collect_run_manifest,
-    write_run_manifest,
-)
+from t1_features.config import T1ConfigError, load_t1_config
+from t1_features.run_manifest import RunManifestError, load_run_manifest
+from t1_features.workspace import T1WorkspaceError, create_t1_run
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,52 +25,48 @@ def _run_prepare_t1_run(args: argparse.Namespace) -> int:
         print("error: C must be finite and positive:", file=sys.stderr)
         print(f"  {C!r}", file=sys.stderr)
         return 1
-    output_path = Path(args.output)
-    if output_path.is_dir():
-        print("error: output path is a directory:", file=sys.stderr)
-        print(f"  {output_path}", file=sys.stderr)
-        return 1
-    if output_path.exists() or output_path.is_symlink():
-        print("error: run passport already exists:", file=sys.stderr)
-        print(f"  {output_path}", file=sys.stderr)
-        return 1
-    if not output_path.parent.is_dir():
-        print("error: output directory does not exist:", file=sys.stderr)
-        print(f"  {output_path.parent}", file=sys.stderr)
-        return 1
     try:
-        data_dir, tag = _preflight_benchmark(args.data_dir)
-    except (CorpusTagError, DataError) as exc:
+        config = load_t1_config(
+            _PROJECT_ROOT,
+            data_dir=args.data_dir,
+            split_file=args.split_file,
+        )
+    except T1ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    try:
-        manifest = collect_run_manifest(
-            code_dir=_PROJECT_ROOT,
-            data_dir=data_dir,
-            data_tag=tag,
-            split_file=Path(args.split_file),
-            C=C,
+    if not config.config_found:
+        print(
+            "Local configuration not found: "
+            f"{config.config_path}; using defaults and explicit overrides.",
+            file=sys.stderr,
         )
-    except RunManifestError as exc:
+    try:
+        created = create_t1_run(
+            config,
+            C=C,
+            run_dir=args.run_dir,
+        )
+    except T1WorkspaceError as exc:
         print(f"error: {exc}", file=sys.stderr)
         for note in getattr(exc, "__notes__", ()):
             print(f"  {note}", file=sys.stderr)
+        return 1
+    try:
+        manifest = load_run_manifest(created / "run.json")
+    except RunManifestError as exc:
+        print(
+            "error: run directory was created but its passport could not "
+            f"be read for reporting: {created}",
+            file=sys.stderr,
+        )
+        print(f"  {exc}", file=sys.stderr)
         return 1
     if manifest["code"]["dirty"] or manifest["data"]["dirty"]:
         print(_DIRTY_WARNING, file=sys.stderr)
-    try:
-        write_run_manifest(manifest, output_path)
-    except RunManifestError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        for note in getattr(exc, "__notes__", ()):
-            print(f"  {note}", file=sys.stderr)
-        return 1
-    print("T1 run metadata prepared")
-    print(f"Run passport: {output_path}")
-    print(f"Code commit: {manifest['code']['commit']}")
+    print("T1 run prepared")
+    print(f"Run directory: {created}")
     print(f"Data tag: {manifest['data']['tag']}")
-    print(f"Data commit: {manifest['data']['commit']}")
-    print(f"Split SHA-256: {manifest['split']['sha256']}")
-    print(f"C: {C}")
-    print("Target split: dev")
+    print(f"Split file: {manifest['split']['path']}")
+    print(f"C: {manifest['parameters']['C']}")
+    print(f"Target split: {manifest['parameters']['target_split']}")
     return 0

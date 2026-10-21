@@ -283,10 +283,13 @@ def build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     prepare_t1.add_argument(
-        "--output",
+        "--run-dir",
         type=Path,
-        required=True,
-        help="Path for the JSON run passport",
+        default=None,
+        help=(
+            "Directory for the prepared T1 run "
+            "(default: unique new directory under runs_dir)"
+        ),
     )
     prepare_t1.add_argument(
         "--C",
@@ -303,8 +306,8 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_t1.add_argument(
         "--split-file",
         type=Path,
-        required=True,
-        help="Path to the benchmark splits CSV",
+        default=None,
+        help="Override the published splits CSV (default: published split for the data tag)",
     )
     return parser
 
