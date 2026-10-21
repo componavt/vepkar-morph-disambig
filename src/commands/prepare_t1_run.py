@@ -13,11 +13,6 @@ from t1_features.workspace import T1WorkspaceError, create_t1_run
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-_DIRTY_WARNING = (
-    "Recorded local changes; commit IDs alone do not identify\n"
-    "the exact executed code/data. Review changes before the experiment."
-)
-
 
 def _run_prepare_t1_run(args: argparse.Namespace) -> int:
     C = args.C
@@ -65,8 +60,6 @@ def _run_prepare_t1_run(args: argparse.Namespace) -> int:
         )
         print(f"  {exc}", file=sys.stderr)
         return 1
-    if manifest["code"]["dirty"] or manifest["data"]["dirty"]:
-        print(_DIRTY_WARNING, file=sys.stderr)
     print("T1 run prepared")
     print(f"Run directory: {created}")
     print(f"Data tag: {manifest['data']['tag']}")

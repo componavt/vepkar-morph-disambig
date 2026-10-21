@@ -188,7 +188,5 @@ changed = [key for key in sorted(set(expected) | set(current))
 if changed:
     raise SystemExit('STOP: passport differs from current metadata: ' + ', '.join(changed))
 print('Run passport matches current metadata.')
-if current['code']['dirty'] or current['data']['dirty']:
-    print('WARNING: unchanged status text does not prove dirty-file contents are unchanged.', file=sys.stderr)
 PY
 }

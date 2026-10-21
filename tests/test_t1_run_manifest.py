@@ -43,11 +43,6 @@ GIT_AVAILABLE = _git_available()
 _SPLIT_CONTENT = "language,text_id,split\nvep,1,dev\nvep,2,train\nkrl,1,dev\n"
 _TAG = "v2026.09"
 
-_WARNING = (
-    "Recorded local changes; commit IDs alone do not identify\n"
-    "the exact executed code/data. Review changes before the experiment."
-)
-
 
 class _WriteAndCloseFailingStream:
     def __init__(self, stream, write_error, close_error):
@@ -171,20 +166,13 @@ def _created_run_dir(captured) -> Path:
 def _stable_manifest() -> dict:
     return {
         "format": "vepkar-t1-run",
-        "format_version": 2,
+        "format_version": 3,
         "stage": "prepared",
-        "code": {
-            "root": "/code",
-            "commit": "c" * 40,
-            "status_porcelain": "",
-            "dirty": False,
-        },
+        "code": {"root": "/code", "commit": "c" * 40},
         "data": {
             "root": "/data",
             "tag": "v2026.09",
             "commit": "d" * 40,
-            "status_porcelain": "",
-            "dirty": False,
         },
         "split": {"path": "/split.csv", "sha256": "0" * 64},
         "parameters": {"C": 1.0, "target_split": "dev"},
@@ -293,67 +281,24 @@ class TestCollectSchema:
             "parameters",
         ]
         assert manifest["format"] == "vepkar-t1-run"
-        assert manifest["format_version"] == 2
+        assert manifest["format_version"] == 3
         assert manifest["stage"] == "prepared"
-        assert list(manifest["code"]) == [
-            "root",
-            "commit",
-            "status_porcelain",
-            "dirty",
-        ]
+        assert list(manifest["code"]) == ["root", "commit"]
         assert manifest["code"] == {
             "root": str(code.resolve()),
             "commit": code_commit,
-            "status_porcelain": "",
-            "dirty": False,
         }
-        assert list(manifest["data"]) == [
-            "root",
-            "tag",
-            "commit",
-            "status_porcelain",
-            "dirty",
-        ]
+        assert list(manifest["data"]) == ["root", "tag", "commit"]
         assert manifest["data"] == {
             "root": str(data.resolve()),
             "tag": "v2026.09",
             "commit": data_commit,
-            "status_porcelain": "",
-            "dirty": False,
         }
         assert manifest["split"] == {
             "path": str(split.resolve()),
             "sha256": expected_sha256,
         }
         assert manifest["parameters"] == {"C": 2.5, "target_split": "dev"}
-
-
-@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
-class TestWorkingTreeState:
-    def test_clean_trees_record_empty_porcelain(self, tmp_path):
-        code = _valid_code_repo(tmp_path)
-        data = _tagged_data_repo(tmp_path)
-        split = _split_file(tmp_path)
-        manifest = _collect(code, data, split)
-        assert manifest["code"]["status_porcelain"] == ""
-        assert manifest["code"]["dirty"] is False
-        assert manifest["data"]["status_porcelain"] == ""
-        assert manifest["data"]["dirty"] is False
-
-    def test_tracked_and_untracked_changes_preserve_leading_spaces(self, tmp_path):
-        code = _valid_code_repo(tmp_path)
-        data = _tagged_data_repo(tmp_path)
-        split = _split_file(tmp_path)
-
-        (data / "README.md").write_text("changed\n", encoding="utf-8")
-        (data / "new.txt").write_text("untracked\n", encoding="utf-8")
-
-        manifest = _collect(code, data, split)
-        porcelain = manifest["data"]["status_porcelain"]
-        assert " M README.md" in porcelain
-        assert "?? new.txt" in porcelain
-        assert manifest["data"]["dirty"] is True
-        assert manifest["code"]["dirty"] is False
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
@@ -440,7 +385,6 @@ class TestPrepareT1RunCommand:
             f"{code / 't1.local.toml'}; using defaults and explicit overrides."
         )
         assert captured.err.count(notice) == 1
-        assert "Recorded local changes" not in captured.err
         assert "T1 run prepared" in captured.out
         created = _created_run_dir(captured)
         assert f"Run directory: {created}" in captured.out
@@ -451,8 +395,6 @@ class TestPrepareT1RunCommand:
         manifest = load_run_manifest(created / "run.json")
         assert manifest["data"]["root"] == str(data)
         assert manifest["data"]["tag"] == _TAG
-        assert manifest["data"]["dirty"] is False
-        assert manifest["code"]["dirty"] is False
         assert manifest["split"]["path"] == str(split.resolve())
         assert manifest["split"]["sha256"] == hashlib.sha256(
             split.read_bytes()
@@ -635,23 +577,6 @@ class TestPrepareT1RunCommand:
         assert "T1 run prepared" not in captured.out
         assert "Run directory:" not in captured.out
 
-    def test_cli_dirty_trees_warn_without_rejecting(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        code = _valid_code_repo(tmp_path)
-        data = _tagged_data_repo(tmp_path)
-        _default_split(code)
-        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
-        (code / "README.md").write_text("changed\n", encoding="utf-8")
-        (data / "new.txt").write_text("untracked\n", encoding="utf-8")
-
-        status = cli.main(["prepare-t1-run", "--data-dir", str(data)])
-        captured = capsys.readouterr()
-        assert status == 0, captured.err
-        assert _WARNING in captured.err
-        assert "T1 run prepared" in captured.out
-        assert load_run_manifest(_created_run_dir(captured) / "run.json")
-
     def test_cli_passport_reread_failure_reports_created_run(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -677,43 +602,6 @@ class TestPrepareT1RunCommand:
         assert (created / "run.json").is_file()
         load_run_manifest(created / "run.json")
         assert sorted(p.name for p in created.iterdir()) == ["run.json"]
-
-
-@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
-class TestDirtyWarning:
-    @staticmethod
-    def _run(tmp_path, monkeypatch, capsys, dirty: bool):
-        code = _valid_code_repo(tmp_path, name="code-warn")
-        data = _tagged_data_repo(tmp_path, name="data-warn")
-        _default_split(code)
-        monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
-        if dirty:
-            (code / "README.md").write_text("changed\n", encoding="utf-8")
-            (data / "new.txt").write_text("untracked\n", encoding="utf-8")
-        status = prepare_pkg._run_prepare_t1_run(
-            argparse.Namespace(
-                C=1.0, run_dir=None, data_dir=data, split_file=None
-            )
-        )
-        captured = capsys.readouterr()
-        created = _created_run_dir(captured)
-        return status, created, captured
-
-    def test_clean_trees_record_without_warning(self, tmp_path, monkeypatch, capsys):
-        status, created, captured = self._run(
-            tmp_path, monkeypatch, capsys, dirty=False
-        )
-        assert status == 0, captured.err
-        assert (created / "run.json").is_file()
-        assert _WARNING not in captured.err
-
-    def test_dirty_trees_warn_on_stderr(self, tmp_path, monkeypatch, capsys):
-        status, created, captured = self._run(
-            tmp_path, monkeypatch, capsys, dirty=True
-        )
-        assert status == 0, captured.err
-        assert (created / "run.json").is_file()
-        assert _WARNING in captured.err
 
 
 class TestPublication:
@@ -1063,12 +951,14 @@ class TestGitLaunchFailure:
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestNonMutatingGitObservation:
-    def test_production_git_calls_carry_no_optional_locks_option(
+    def test_collection_records_identities_with_rev_parse_only(
         self, tmp_path, monkeypatch
     ):
         code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _split_file(tmp_path)
+        code_commit = _git(code, "rev-parse", "HEAD").stdout.strip()
+        data_commit = _git(data, "rev-parse", "HEAD").stdout.strip()
         original_run = subprocess.run
         invocations = []
 
@@ -1078,13 +968,24 @@ class TestNonMutatingGitObservation:
 
         monkeypatch.setattr(subprocess, "run", spy_run)
         manifest = _collect(code, data, split)
-        assert manifest["code"]["dirty"] is False
+        assert manifest["code"]["root"] == str(code.resolve())
+        assert manifest["code"]["commit"] == code_commit
+        assert manifest["data"]["root"] == str(data.resolve())
+        assert manifest["data"]["commit"] == data_commit
         git_calls = [cmd for cmd in invocations if cmd and cmd[0] == "git"]
-        assert git_calls
-        for command in git_calls:
-            assert command[1] == "--no-optional-locks"
-            assert command[2] == "-C"
-            assert str(code) in command or str(data) in command
+        assert len(git_calls) == 4
+        assert all(
+            command[1] == "--no-optional-locks"
+            and command[2] == "-C"
+            and (str(code) in command or str(data) in command)
+            for command in git_calls
+        )
+        assert [command[4] for command in git_calls] == ["rev-parse"] * 4
+        assert not any(
+            "status" in argument
+            for command in git_calls
+            for argument in command
+        )
 
 
 def _set_key(manifest: dict, *path, value) -> dict:
@@ -1112,25 +1013,8 @@ def _write_raw(tmp_path: Path, manifest, name: str = "run.json") -> Path:
 
 
 class TestLoadRoundTrip:
-    @pytest.mark.parametrize(
-        "mutate",
-        [
-            lambda manifest: None,
-            lambda manifest: (
-                _set_key(
-                    manifest,
-                    "data",
-                    "status_porcelain",
-                    value="?? new.txt\n M README.md",
-                ),
-                _set_key(manifest, "data", "dirty", value=True),
-            ),
-        ],
-        ids=["clean", "dirty-with-leading-spaces"],
-    )
-    def test_write_load_round_trip_preserves_manifest(self, tmp_path, mutate):
+    def test_write_load_round_trip_preserves_manifest(self, tmp_path):
         manifest = _stable_manifest()
-        mutate(manifest)
         output = tmp_path / "run.json"
         write_run_manifest(manifest, output)
         assert load_run_manifest(output) == manifest
@@ -1152,11 +1036,22 @@ class TestLoadNonMutating:
         assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
 
 
-class TestLoadVersionAndEnvironmentRejection:
+class TestLoadVersionRejection:
     @pytest.mark.parametrize(
         "version",
-        [1, 0, 3, -1, "2", 2.0, None, True],
-        ids=["v1", "zero", "v3", "negative", "string", "float", "null", "boolean"],
+        [1, 2, 0, -1, "2", "3", 2.0, 3.0, None, True],
+        ids=[
+            "v1",
+            "v2",
+            "zero",
+            "negative",
+            "string-two",
+            "string-three",
+            "float-two",
+            "float-three",
+            "null",
+            "boolean",
+        ],
     )
     def test_unsupported_format_versions_rejected(self, tmp_path, version):
         manifest = _stable_manifest()
@@ -1166,13 +1061,9 @@ class TestLoadVersionAndEnvironmentRejection:
             load_run_manifest(output)
         assert "format_version" in str(exc_info.value)
 
-    def test_version_2_with_environment_rejected(self, tmp_path):
-        manifest = _stable_manifest()
-        manifest["environment"] = {}
-        output = _write_raw(tmp_path, manifest)
-        with pytest.raises(RunManifestError) as exc_info:
-            load_run_manifest(output)
-        assert "environment" in str(exc_info.value)
+    def test_format_version_3_accepted(self, tmp_path):
+        output = _write_raw(tmp_path, _stable_manifest())
+        assert load_run_manifest(output)["format_version"] == 3
 
 
 class TestSchemaRejection:
@@ -1181,7 +1072,7 @@ class TestSchemaRejection:
         [
             ("parameters",),
             ("split", "sha256"),
-            ("code", "dirty"),
+            ("code", "commit"),
             ("data", "tag"),
             ("stage",),
         ],
@@ -1348,7 +1239,7 @@ class TestCollectRejectsInvalidCBeforeRepoAccess:
         assert calls == []
 
 
-class TestFingerprintAndDirtyConsistency:
+class TestSplitFingerprintValidation:
     @pytest.mark.parametrize(
         "fingerprint",
         [
@@ -1367,32 +1258,6 @@ class TestFingerprintAndDirtyConsistency:
         with pytest.raises(RunManifestError) as exc_info:
             load_run_manifest(output)
         assert "split.sha256" in str(exc_info.value)
-
-    @pytest.mark.parametrize(
-        "mutate",
-        [
-            lambda manifest: _set_key(manifest, "code", "dirty", value=True),
-            lambda manifest: (
-                _set_key(manifest, "data", "status_porcelain", value=" M README.md"),
-                _set_key(manifest, "data", "dirty", value=False),
-            ),
-            lambda manifest: _set_key(manifest, "code", "dirty", value=1),
-            lambda manifest: _set_key(manifest, "code", "status_porcelain", value=5),
-        ],
-        ids=[
-            "dirty-with-empty-status",
-            "clean-with-nonempty-status",
-            "dirty-not-boolean",
-            "status-not-string",
-        ],
-    )
-    def test_inconsistent_dirty_status_rejected(self, tmp_path, mutate):
-        manifest = _stable_manifest()
-        mutate(manifest)
-        output = _write_raw(tmp_path, manifest)
-        with pytest.raises(RunManifestError) as exc_info:
-            load_run_manifest(output)
-        assert "dirty" in str(exc_info.value)
 
 
 class TestLoadErrorsPathAware:
@@ -1438,9 +1303,8 @@ class TestWriterRejectsInvalidManifest:
             lambda manifest: _set_key(manifest, "split", "sha256", value="not-hex"),
             lambda manifest: _set_key(manifest, "format_version", value=1),
             lambda manifest: _set_key(manifest, "environment", value={}),
-            lambda manifest: _set_key(manifest, "code", "dirty", value=True),
         ],
-        ids=["invalid-C", "invalid-fingerprint", "v1", "environment", "inconsistent-dirty"],
+        ids=["invalid-C", "invalid-fingerprint", "v1", "environment"],
     )
     def test_invalid_manifest_rejected_before_any_file_creation(
         self, tmp_path, mutate

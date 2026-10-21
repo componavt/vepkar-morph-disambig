@@ -1,13 +1,10 @@
 """Record provenance and intended settings of a forthcoming T1 dev experiment.
 
-This module prepares metadata only.  It does not train, predict, evaluate,
-or certify that a dirty working tree is reproducible.  All observations
-(Git state, split fingerprint, parameters) are collected *before* the
-passport file itself is created, so the recorded state never contains the
-passport.  Git status describes working-tree/index differences, not a
-complete content archive, and ignored files are not represented at all.
-https://git-scm.com/docs/git-status  The split SHA-256 fingerprints the
-raw file bytes, not semantic split equivalence.
+This module prepares metadata only.  It does not train, predict, or
+evaluate.  All observations (repository identities, split fingerprint,
+parameters) are collected *before* the passport file itself is created, so
+the recorded state never contains the passport.  The split SHA-256
+fingerprints the raw file bytes, not semantic split equivalence.
 https://www.gnu.org/s/coreutils/manual/html_node/sha2-utilities.html
 """
 
@@ -23,7 +20,7 @@ import tempfile
 from pathlib import Path
 
 _FORMAT_NAME = "vepkar-t1-run"
-_FORMAT_VERSION = 2
+_FORMAT_VERSION = 3
 _STAGE = "prepared"
 _TARGET_SPLIT = "dev"
 _TEMP_PREFIX = ".vepkar-t1-run-"
@@ -39,8 +36,8 @@ _TOP_LEVEL_KEYS = (
     "split",
     "parameters",
 )
-_CODE_KEYS = ("root", "commit", "status_porcelain", "dirty")
-_DATA_KEYS = ("root", "tag", "commit", "status_porcelain", "dirty")
+_CODE_KEYS = ("root", "commit")
+_DATA_KEYS = ("root", "tag", "commit")
 _SPLIT_KEYS = ("path", "sha256")
 _PARAMETER_KEYS = ("C", "target_split")
 
@@ -86,23 +83,6 @@ def _validate_repo(section: dict, location: str, *, has_tag: bool) -> None:
     _require_nonempty_string(section["commit"], f"{location}.commit")
     if has_tag:
         _require_nonempty_string(section["tag"], f"{location}.tag")
-    status_porcelain = section["status_porcelain"]
-    if not isinstance(status_porcelain, str):
-        raise RunManifestError(
-            f"invalid run manifest: {location}.status_porcelain must be a "
-            f"string, got {status_porcelain!r}"
-        )
-    dirty = section["dirty"]
-    if type(dirty) is not bool:
-        raise RunManifestError(
-            f"invalid run manifest: {location}.dirty must be a boolean, "
-            f"got {dirty!r}"
-        )
-    if dirty != bool(status_porcelain):
-        raise RunManifestError(
-            f"invalid run manifest: {location}.dirty must match whether "
-            f"{location}.status_porcelain is nonempty, got {dirty!r}"
-        )
 
 
 def _validate_positive_finite(value) -> None:
@@ -126,7 +106,7 @@ def _validate_positive_finite(value) -> None:
 
 
 def _validate_manifest(manifest: object) -> None:
-    """Require the exact version-2 T1 run passport schema."""
+    """Require the exact version-3 T1 run passport schema."""
     if not isinstance(manifest, dict):
         raise RunManifestError("invalid run manifest: expected a dictionary")
     _require_keys(manifest, _TOP_LEVEL_KEYS, "manifest")
@@ -210,14 +190,9 @@ def _repository_root(supplied: Path) -> Path:
 
 def _git_snapshot(root: Path) -> dict[str, object]:
     commit = _git(root, "rev-parse", "HEAD").strip()
-    porcelain = _git(
-        root, "status", "--porcelain=v1", "--untracked-files=all"
-    ).rstrip("\n")
     return {
         "root": str(root),
         "commit": commit,
-        "status_porcelain": porcelain,
-        "dirty": bool(porcelain),
     }
 
 
@@ -258,8 +233,6 @@ def collect_run_manifest(
         "root": data_snapshot["root"],
         "tag": data_tag,
         "commit": data_snapshot["commit"],
-        "status_porcelain": data_snapshot["status_porcelain"],
-        "dirty": data_snapshot["dirty"],
     }
     manifest = {
         "format": _FORMAT_NAME,
