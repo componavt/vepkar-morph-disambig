@@ -13,6 +13,9 @@ __pycache__/
 
 # Machine-local T1 run settings
 /.env.t1.local
+/t1.local.toml
+
+/work/
 
 # Distribution / packaging
 .Python

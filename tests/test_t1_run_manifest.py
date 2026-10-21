@@ -7,16 +7,11 @@ import copy
 import hashlib
 import json
 import os
-import platform
 import subprocess
 import sys
 from pathlib import Path
 
-import joblib
-import numpy as np
 import pytest
-import scipy
-import sklearn
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
@@ -29,6 +24,7 @@ import t1_features.run_manifest as run_manifest  # noqa: E402
 from t1_features.run_manifest import (  # noqa: E402
     RunManifestError,
     collect_run_manifest,
+    load_run_manifest,
     write_run_manifest,
 )
 
@@ -154,20 +150,10 @@ def _split_file(
     return path
 
 
-def _expected_environment() -> dict[str, str]:
-    return {
-        "python": platform.python_version(),
-        "numpy": np.__version__,
-        "scipy": scipy.__version__,
-        "scikit-learn": sklearn.__version__,
-        "joblib": joblib.__version__,
-    }
-
-
 def _stable_manifest() -> dict:
     return {
         "format": "vepkar-t1-run",
-        "format_version": 1,
+        "format_version": 2,
         "stage": "prepared",
         "code": {
             "root": "/code",
@@ -183,7 +169,6 @@ def _stable_manifest() -> dict:
             "dirty": False,
         },
         "split": {"path": "/split.csv", "sha256": "0" * 64},
-        "environment": _expected_environment(),
         "parameters": {"C": 1.0, "target_split": "dev"},
     }
 
@@ -256,11 +241,10 @@ class TestCollectSchema:
             "code",
             "data",
             "split",
-            "environment",
             "parameters",
         ]
         assert manifest["format"] == "vepkar-t1-run"
-        assert manifest["format_version"] == 1
+        assert manifest["format_version"] == 2
         assert manifest["stage"] == "prepared"
         assert list(manifest["code"]) == [
             "root",
@@ -292,7 +276,6 @@ class TestCollectSchema:
             "path": str(split.resolve()),
             "sha256": expected_sha256,
         }
-        assert manifest["environment"] == _expected_environment()
         assert manifest["parameters"] == {"C": 2.5, "target_split": "dev"}
 
 
@@ -425,7 +408,7 @@ class TestPrepareT1RunCommand:
 
         manifest = json.loads(output.read_text(encoding="utf-8"))
         assert manifest["format"] == "vepkar-t1-run"
-        assert manifest["format_version"] == 1
+        assert manifest["format_version"] == 2
         assert manifest["stage"] == "prepared"
         assert manifest["code"]["root"] == str(ROOT)
         assert manifest["code"]["commit"] == code_commit
@@ -440,8 +423,9 @@ class TestPrepareT1RunCommand:
             "path": str(split.resolve()),
             "sha256": expected_sha256,
         }
-        assert manifest["environment"] == _expected_environment()
         assert manifest["parameters"] == {"C": 0.5, "target_split": "dev"}
+        load_run_manifest(output)
+        assert json.loads(output.read_text(encoding="utf-8")) == manifest
 
     def test_missing_split_file_fails_without_output(self, tmp_path, capsys):
         data = _tagged_data_repo(tmp_path)
@@ -953,3 +937,307 @@ class TestNonMutatingGitObservation:
             assert command[1] == "--no-optional-locks"
             assert command[2] == "-C"
             assert str(code) in command or str(data) in command
+
+
+def _set_key(manifest: dict, *path, value) -> dict:
+    target = manifest
+    for part in path[:-1]:
+        target = target[part]
+    target[path[-1]] = value
+    return manifest
+
+
+def _drop_key(manifest: dict, *path) -> dict:
+    target = manifest
+    for part in path[:-1]:
+        target = target[part]
+    del target[path[-1]]
+    return manifest
+
+
+def _write_raw(tmp_path: Path, manifest, name: str = "run.json") -> Path:
+    output = tmp_path / name
+    output.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return output
+
+
+class TestLoadRoundTrip:
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda manifest: None,
+            lambda manifest: (
+                _set_key(
+                    manifest,
+                    "data",
+                    "status_porcelain",
+                    value="?? new.txt\n M README.md",
+                ),
+                _set_key(manifest, "data", "dirty", value=True),
+            ),
+        ],
+        ids=["clean", "dirty-with-leading-spaces"],
+    )
+    def test_write_load_round_trip_preserves_manifest(self, tmp_path, mutate):
+        manifest = _stable_manifest()
+        mutate(manifest)
+        output = tmp_path / "run.json"
+        write_run_manifest(manifest, output)
+        assert load_run_manifest(output) == manifest
+
+
+class TestLoadNonMutating:
+    def test_loading_leaves_file_bytes_and_directory_entries_unchanged(
+        self, tmp_path
+    ):
+        output = tmp_path / "run.json"
+        output.write_text(
+            json.dumps(_stable_manifest(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        before = output.read_bytes()
+        entries_before = sorted(p.name for p in tmp_path.iterdir())
+        load_run_manifest(output)
+        assert output.read_bytes() == before
+        assert sorted(p.name for p in tmp_path.iterdir()) == entries_before
+
+
+class TestLoadVersionAndEnvironmentRejection:
+    @pytest.mark.parametrize(
+        "version",
+        [1, 0, 3, -1, "2", 2.0, None, True],
+        ids=["v1", "zero", "v3", "negative", "string", "float", "null", "boolean"],
+    )
+    def test_unsupported_format_versions_rejected(self, tmp_path, version):
+        manifest = _stable_manifest()
+        manifest["format_version"] = version
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "format_version" in str(exc_info.value)
+
+    def test_version_2_with_environment_rejected(self, tmp_path):
+        manifest = _stable_manifest()
+        manifest["environment"] = {}
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "environment" in str(exc_info.value)
+
+
+class TestSchemaRejection:
+    @pytest.mark.parametrize(
+        "drop_path",
+        [
+            ("parameters",),
+            ("split", "sha256"),
+            ("code", "dirty"),
+            ("data", "tag"),
+            ("stage",),
+        ],
+        ids=["top-level", "split", "code", "data", "stage"],
+    )
+    def test_missing_keys_rejected(self, tmp_path, drop_path):
+        manifest = _drop_key(_stable_manifest(), *drop_path)
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "missing keys" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "key_path",
+        [
+            ("surprise",),
+            ("code", "surprise"),
+            ("data", "surprise"),
+            ("split", "surprise"),
+            ("parameters", "surprise"),
+        ],
+        ids=["top-level", "code", "data", "split", "parameters"],
+    )
+    def test_extra_keys_rejected(self, tmp_path, key_path):
+        manifest = _set_key(_stable_manifest(), *key_path, value=1)
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "unexpected keys" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "key_path",
+        [
+            ("code",),
+            ("data",),
+            ("split",),
+            ("parameters",),
+        ],
+        ids=["code", "data", "split", "parameters"],
+    )
+    def test_non_mapping_sections_rejected(self, tmp_path, key_path):
+        manifest = _set_key(_stable_manifest(), *key_path, value=["not", "a", "mapping"])
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "must be a dictionary" in str(exc_info.value)
+        assert ".".join(key_path) in str(exc_info.value)
+
+    def test_non_dictionary_payload_rejected(self, tmp_path):
+        output = tmp_path / "run.json"
+        output.write_text("[1, 2]", encoding="utf-8")
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert str(output) in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda manifest: _set_key(manifest, "format", value="other"),
+            lambda manifest: _set_key(manifest, "stage", value="done"),
+            lambda manifest: _set_key(manifest, "code", "root", value=7),
+            lambda manifest: _set_key(manifest, "code", "root", value=""),
+            lambda manifest: _set_key(manifest, "code", "commit", value=""),
+            lambda manifest: _set_key(manifest, "data", "tag", value=""),
+            lambda manifest: _set_key(manifest, "split", "path", value=""),
+            lambda manifest: _set_key(manifest, "parameters", "target_split", value="train"),
+        ],
+        ids=[
+            "wrong-format",
+            "wrong-stage",
+            "numeric-root",
+            "empty-root",
+            "empty-commit",
+            "empty-tag",
+            "empty-split-path",
+            "wrong-target-split",
+        ],
+    )
+    def test_representative_incorrect_values_rejected(self, tmp_path, mutate):
+        manifest = _stable_manifest()
+        mutate(manifest)
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError):
+            load_run_manifest(output)
+
+
+class TestInvalidCRejection:
+    @pytest.mark.parametrize(
+        "C",
+        [True, float("nan"), float("inf"), float("-inf"), 0.0, -1.0, 0, "1.0", None],
+        ids=["boolean", "nan", "infinity", "negative-infinity", "zero", "negative", "int-zero", "string", "null"],
+    )
+    def test_invalid_C_rejected_on_load(self, tmp_path, C):
+        manifest = _stable_manifest()
+        manifest["parameters"]["C"] = C
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "C" in str(exc_info.value)
+
+
+class TestFingerprintAndDirtyConsistency:
+    @pytest.mark.parametrize(
+        "fingerprint",
+        [
+            "0" * 63,
+            "0" * 65,
+            "g" + "0" * 63,
+            "0" * 32 + "A" + "0" * 31,
+            "",
+        ],
+        ids=["too-short", "too-long", "non-hex", "uppercase", "empty"],
+    )
+    def test_invalid_split_sha256_rejected(self, tmp_path, fingerprint):
+        manifest = _stable_manifest()
+        manifest["split"]["sha256"] = fingerprint
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "split.sha256" in str(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda manifest: _set_key(manifest, "code", "dirty", value=True),
+            lambda manifest: (
+                _set_key(manifest, "data", "status_porcelain", value=" M README.md"),
+                _set_key(manifest, "data", "dirty", value=False),
+            ),
+            lambda manifest: _set_key(manifest, "code", "dirty", value=1),
+            lambda manifest: _set_key(manifest, "code", "status_porcelain", value=5),
+        ],
+        ids=[
+            "dirty-with-empty-status",
+            "clean-with-nonempty-status",
+            "dirty-not-boolean",
+            "status-not-string",
+        ],
+    )
+    def test_inconsistent_dirty_status_rejected(self, tmp_path, mutate):
+        manifest = _stable_manifest()
+        mutate(manifest)
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "dirty" in str(exc_info.value)
+
+
+class TestLoadErrorsPathAware:
+    def test_missing_file_reports_path_and_cause(self, tmp_path):
+        missing = tmp_path / "missing.json"
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(missing)
+        assert str(missing) in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, FileNotFoundError)
+
+    @pytest.mark.parametrize(
+        "content, cause_type",
+        [
+            (b'{"format":', json.JSONDecodeError),
+            (b"\xff\xfe", UnicodeDecodeError),
+        ],
+        ids=["malformed-json", "invalid-utf8"],
+    )
+    def test_parse_failure_reports_path_and_cause(
+        self, tmp_path, content, cause_type
+    ):
+        output = tmp_path / "run.json"
+        output.write_bytes(content)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert str(output) in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, cause_type)
+
+    def test_schema_error_reports_path(self, tmp_path):
+        manifest = _stable_manifest()
+        manifest["format_version"] = 1
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert str(output) in str(exc_info.value)
+
+
+class TestWriterRejectsInvalidManifest:
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda manifest: _set_key(manifest, "parameters", "C", value=-1.0),
+            lambda manifest: _set_key(manifest, "split", "sha256", value="not-hex"),
+            lambda manifest: _set_key(manifest, "format_version", value=1),
+            lambda manifest: _set_key(manifest, "environment", value={}),
+            lambda manifest: _set_key(manifest, "code", "dirty", value=True),
+        ],
+        ids=["invalid-C", "invalid-fingerprint", "v1", "environment", "inconsistent-dirty"],
+    )
+    def test_invalid_manifest_rejected_before_any_file_creation(
+        self, tmp_path, mutate
+    ):
+        manifest = _stable_manifest()
+        mutate(manifest)
+        output = tmp_path / "run.json"
+        with pytest.raises(RunManifestError) as exc_info:
+            write_run_manifest(manifest, output)
+        assert "invalid run manifest" in str(exc_info.value)
+        assert not output.exists()
+        assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
+        assert sorted(p.name for p in tmp_path.iterdir()) == []

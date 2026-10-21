@@ -2,12 +2,12 @@
 
 This module prepares metadata only.  It does not train, predict, evaluate,
 or certify that a dirty working tree is reproducible.  All observations
-(Git state, split fingerprint, environment, parameters) are collected
-*before* the passport file itself is created, so the recorded state never
-contains the passport.  Git status describes working-tree/index
-differences, not a complete content archive, and ignored files are not
-represented at all.  https://git-scm.com/docs/git-status  The split
-SHA-256 fingerprints the raw file bytes, not semantic split equivalence.
+(Git state, split fingerprint, parameters) are collected *before* the
+passport file itself is created, so the recorded state never contains the
+passport.  Git status describes working-tree/index differences, not a
+complete content archive, and ignored files are not represented at all.
+https://git-scm.com/docs/git-status  The split SHA-256 fingerprints the
+raw file bytes, not semantic split equivalence.
 https://www.gnu.org/s/coreutils/manual/html_node/sha2-utilities.html
 """
 
@@ -17,38 +17,156 @@ import hashlib
 import json
 import math
 import os
-import platform
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 
-import joblib
-import numpy as np
-import scipy
-import sklearn
-
 _FORMAT_NAME = "vepkar-t1-run"
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 _STAGE = "prepared"
 _TARGET_SPLIT = "dev"
-_ENVIRONMENT_KEYS = ("python", "numpy", "scipy", "scikit-learn", "joblib")
 _TEMP_PREFIX = ".vepkar-t1-run-"
 _TEMP_SUFFIX = ".tmp"
 _CHUNK_BYTES = 65536
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_TOP_LEVEL_KEYS = (
+    "format",
+    "format_version",
+    "stage",
+    "code",
+    "data",
+    "split",
+    "parameters",
+)
+_CODE_KEYS = ("root", "commit", "status_porcelain", "dirty")
+_DATA_KEYS = ("root", "tag", "commit", "status_porcelain", "dirty")
+_SPLIT_KEYS = ("path", "sha256")
+_PARAMETER_KEYS = ("C", "target_split")
 
 
 class RunManifestError(ValueError):
     """Expected collection or publication failure for a T1 run passport."""
 
 
-def _current_environment() -> dict[str, str]:
-    return {
-        "python": platform.python_version(),
-        "numpy": np.__version__,
-        "scipy": scipy.__version__,
-        "scikit-learn": sklearn.__version__,
-        "joblib": joblib.__version__,
-    }
+def _require_keys(mapping: dict, expected, location: str) -> None:
+    missing = [key for key in expected if key not in mapping]
+    extra = [key for key in mapping if key not in expected]
+    if not missing and not extra:
+        return
+    problems = []
+    if missing:
+        problems.append(f"missing keys {missing}")
+    if extra:
+        problems.append(f"unexpected keys {extra}")
+    raise RunManifestError(
+        f"invalid run manifest: {location}: " + "; ".join(problems)
+    )
+
+
+def _require_mapping(value, location: str) -> dict:
+    if not isinstance(value, dict):
+        raise RunManifestError(
+            f"invalid run manifest: {location} must be a dictionary, "
+            f"got {value!r}"
+        )
+    return value
+
+
+def _require_nonempty_string(value, location: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise RunManifestError(
+            f"invalid run manifest: {location} must be a nonempty string, "
+            f"got {value!r}"
+        )
+
+
+def _validate_repo(section: dict, location: str, *, has_tag: bool) -> None:
+    _require_nonempty_string(section["root"], f"{location}.root")
+    _require_nonempty_string(section["commit"], f"{location}.commit")
+    if has_tag:
+        _require_nonempty_string(section["tag"], f"{location}.tag")
+    status_porcelain = section["status_porcelain"]
+    if not isinstance(status_porcelain, str):
+        raise RunManifestError(
+            f"invalid run manifest: {location}.status_porcelain must be a "
+            f"string, got {status_porcelain!r}"
+        )
+    dirty = section["dirty"]
+    if type(dirty) is not bool:
+        raise RunManifestError(
+            f"invalid run manifest: {location}.dirty must be a boolean, "
+            f"got {dirty!r}"
+        )
+    if dirty != bool(status_porcelain):
+        raise RunManifestError(
+            f"invalid run manifest: {location}.dirty must match whether "
+            f"{location}.status_porcelain is nonempty, got {dirty!r}"
+        )
+
+
+def _validate_positive_finite(value) -> None:
+    if type(value) is bool or not isinstance(value, (int, float)):
+        raise RunManifestError(
+            f"invalid run manifest: parameters.C must be a finite positive "
+            f"number, got {value!r}"
+        )
+    if not math.isfinite(value) or value <= 0:
+        raise RunManifestError(
+            f"invalid run manifest: parameters.C must be finite and "
+            f"positive, got {value!r}"
+        )
+
+
+def _validate_manifest(manifest: object) -> None:
+    """Require the exact version-2 T1 run passport schema."""
+    if not isinstance(manifest, dict):
+        raise RunManifestError("invalid run manifest: expected a dictionary")
+    _require_keys(manifest, _TOP_LEVEL_KEYS, "manifest")
+    if manifest["format"] != _FORMAT_NAME:
+        raise RunManifestError(
+            f"invalid run manifest: format must be {_FORMAT_NAME!r}, "
+            f"got {manifest['format']!r}"
+        )
+    if (
+        type(manifest["format_version"]) is not int
+        or manifest["format_version"] != _FORMAT_VERSION
+    ):
+        raise RunManifestError(
+            f"invalid run manifest: format_version must be the integer "
+            f"{_FORMAT_VERSION}, got {manifest['format_version']!r}"
+        )
+    if manifest["stage"] != _STAGE:
+        raise RunManifestError(
+            f"invalid run manifest: stage must be {_STAGE!r}, "
+            f"got {manifest['stage']!r}"
+        )
+    code = _require_mapping(manifest["code"], "manifest.code")
+    _require_keys(code, _CODE_KEYS, "manifest.code")
+    _validate_repo(code, "manifest.code", has_tag=False)
+    data = _require_mapping(manifest["data"], "manifest.data")
+    _require_keys(data, _DATA_KEYS, "manifest.data")
+    _validate_repo(data, "manifest.data", has_tag=True)
+    split = _require_mapping(manifest["split"], "manifest.split")
+    _require_keys(split, _SPLIT_KEYS, "manifest.split")
+    _require_nonempty_string(split["path"], "manifest.split.path")
+    sha256 = split["sha256"]
+    if (
+        type(sha256) is not str
+        or _SHA256_PATTERN.fullmatch(sha256) is None
+    ):
+        raise RunManifestError(
+            f"invalid run manifest: manifest.split.sha256 must be a "
+            f"64-character hexadecimal SHA-256, got {sha256!r}"
+        )
+    parameters = _require_mapping(manifest["parameters"], "manifest.parameters")
+    _require_keys(parameters, _PARAMETER_KEYS, "manifest.parameters")
+    _validate_positive_finite(parameters["C"])
+    if parameters["target_split"] != _TARGET_SPLIT:
+        raise RunManifestError(
+            f"invalid run manifest: parameters.target_split must be "
+            f"{_TARGET_SPLIT!r}, got {parameters['target_split']!r}"
+        )
 
 
 def _git(root: Path, *args: str) -> str:
@@ -137,7 +255,7 @@ def collect_run_manifest(
         "status_porcelain": data_snapshot["status_porcelain"],
         "dirty": data_snapshot["dirty"],
     }
-    return {
+    manifest = {
         "format": _FORMAT_NAME,
         "format_version": _FORMAT_VERSION,
         "stage": _STAGE,
@@ -147,9 +265,24 @@ def collect_run_manifest(
             "path": str(split_file.resolve()),
             "sha256": _split_sha256(split_file),
         },
-        "environment": _current_environment(),
         "parameters": {"C": C, "target_split": _TARGET_SPLIT},
     }
+    _validate_manifest(manifest)
+    return manifest
+
+
+def load_run_manifest(path: Path) -> dict:
+    """Load and validate a run passport without modifying it."""
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunManifestError(f"cannot load run passport {path}: {exc}") from exc
+    try:
+        _validate_manifest(payload)
+    except RunManifestError as exc:
+        raise RunManifestError(f"invalid run passport {path}: {exc}") from exc
+    return payload
 
 
 def write_run_manifest(manifest: dict, output_path: Path) -> None:
@@ -161,6 +294,7 @@ def write_run_manifest(manifest: dict, output_path: Path) -> None:
     were collected by :func:`collect_run_manifest` before publication, so
     the passport never appears in the recorded state.
     """
+    _validate_manifest(manifest)
     if output_path.is_symlink() or output_path.exists():
         raise RunManifestError(f"destination already exists: {output_path}")
     parent = output_path.parent
