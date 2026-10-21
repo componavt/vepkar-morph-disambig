@@ -1,0 +1,18 @@
+# Optional machine-local T1 configuration.
+#
+# Copy this file to `t1.local.toml` (in the repository root) only when
+# machine-local path overrides are needed.  The real file is git-ignored;
+# a missing local configuration is allowed and the loader then uses the
+# built-in defaults (reporting config_found = False).
+#
+# Relative configured paths are repository-relative.  Omitting `split_file`
+# uses the published split for the actual data tag:
+#   <repo_root>/data/derived/splits_<tag>.csv
+#
+# `work/runs` is local generated output and is not tracked by Git.
+
+[paths]
+data_dir = "data/dictorpus-data"
+runs_dir = "work/runs"
+# Optional explicit split:
+# split_file = "data/derived/splits_v2026.09.csv"
