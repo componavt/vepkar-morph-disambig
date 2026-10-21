@@ -21,7 +21,11 @@ _DIRTY_WARNING = (
 
 def _run_prepare_t1_run(args: argparse.Namespace) -> int:
     C = args.C
-    if not math.isfinite(C) or C <= 0:
+    try:
+        valid = not isinstance(C, bool) and math.isfinite(C) and C > 0
+    except OverflowError:
+        valid = False
+    if not valid:
         print("error: C must be finite and positive:", file=sys.stderr)
         print(f"  {C!r}", file=sys.stderr)
         return 1

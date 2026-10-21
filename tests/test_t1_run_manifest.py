@@ -607,7 +607,17 @@ class TestPrepareT1RunCommand:
         assert "T1 run prepared" not in captured.out
         assert "Traceback" not in captured.err
 
-    @pytest.mark.parametrize("C", [0.0, -1.0, float("nan"), float("inf")])
+    @pytest.mark.parametrize(
+        "C",
+        [
+            0.0,
+            -1.0,
+            float("nan"),
+            float("inf"),
+            pytest.param(True, id="boolean"),
+            pytest.param(10**1000, id="oversized-integer"),
+        ],
+    )
     def test_handler_invalid_C_rejected_before_configuration_or_creation(
         self, monkeypatch, capsys, C
     ):
@@ -669,6 +679,7 @@ class TestPrepareT1RunCommand:
         assert sorted(p.name for p in created.iterdir()) == ["run.json"]
 
 
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestDirtyWarning:
     @staticmethod
     def _run(tmp_path, monkeypatch, capsys, dirty: bool):
