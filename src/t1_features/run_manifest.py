@@ -111,7 +111,14 @@ def _validate_positive_finite(value) -> None:
             f"invalid run manifest: parameters.C must be a finite positive "
             f"number, got {value!r}"
         )
-    if not math.isfinite(value) or value <= 0:
+    try:
+        finite = math.isfinite(value)
+    except OverflowError as exc:
+        raise RunManifestError(
+            f"invalid run manifest: parameters.C overflows the finite "
+            f"representation, got {value!r}"
+        ) from exc
+    if not finite or value <= 0:
         raise RunManifestError(
             f"invalid run manifest: parameters.C must be finite and "
             f"positive, got {value!r}"
@@ -238,8 +245,7 @@ def collect_run_manifest(
     C: float,
 ) -> dict:
     """Collect all recorded observations into one prepared run passport."""
-    if not math.isfinite(C) or C <= 0:
-        raise RunManifestError(f"C must be finite and positive, got {C!r}")
+    _validate_positive_finite(C)
     code_root = _repository_root(code_dir)
     data_root = _repository_root(data_dir)
     if code_root == data_root:

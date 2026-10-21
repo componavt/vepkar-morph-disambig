@@ -1134,6 +1134,71 @@ class TestInvalidCRejection:
             load_run_manifest(output)
         assert "C" in str(exc_info.value)
 
+    @pytest.mark.parametrize("C", [1.5, 2, 1e-3, 10**30])
+    def test_valid_positive_C_accepted_on_load(self, tmp_path, C):
+        manifest = _stable_manifest()
+        manifest["parameters"]["C"] = C
+        output = _write_raw(tmp_path, manifest)
+        assert load_run_manifest(output)["parameters"]["C"] == C
+
+
+class TestOversizedIntegerC:
+    @staticmethod
+    def _overflow_cause(error):
+        cause = error
+        while cause is not None:
+            if isinstance(cause, OverflowError):
+                return cause
+            cause = cause.__cause__
+        raise AssertionError("OverflowError not in exception chain")
+
+    def test_load_rejects_oversized_integer_C_with_path_and_cause(self, tmp_path):
+        manifest = _stable_manifest()
+        manifest["parameters"]["C"] = 10**1000
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        message = str(exc_info.value)
+        assert str(output) in message
+        assert "parameters.C" in message
+        self._overflow_cause(exc_info.value)
+
+    def test_write_rejects_oversized_integer_C_before_file_creation(self, tmp_path):
+        manifest = _stable_manifest()
+        manifest["parameters"]["C"] = 10**1000
+        output = tmp_path / "run.json"
+        with pytest.raises(RunManifestError) as exc_info:
+            write_run_manifest(manifest, output)
+        assert "parameters.C" in str(exc_info.value)
+        self._overflow_cause(exc_info.value)
+        assert not output.exists()
+        assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
+class TestCollectRejectsInvalidCBeforeRepoAccess:
+    @pytest.mark.parametrize(
+        "C", [10**1000, True], ids=["oversized-int", "boolean"]
+    )
+    def test_invalid_C_rejected_before_repository_access(
+        self, tmp_path, monkeypatch, C
+    ):
+        code = _valid_code_repo(tmp_path)
+        data = _tagged_data_repo(tmp_path)
+        split = _split_file(tmp_path)
+        calls = []
+
+        def raising_root(*args, **kwargs):
+            calls.append(args)
+            raise AssertionError("repository access must not happen")
+
+        monkeypatch.setattr(run_manifest, "_repository_root", raising_root)
+        with pytest.raises(RunManifestError) as exc_info:
+            _collect(code, data, split, C=C)
+        assert "C" in str(exc_info.value)
+        assert calls == []
+
 
 class TestFingerprintAndDirtyConsistency:
     @pytest.mark.parametrize(

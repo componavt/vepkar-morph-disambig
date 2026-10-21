@@ -22,7 +22,7 @@ import joblib
 import numpy as np
 import scipy
 import sklearn
-from sklearn.exceptions import InconsistentVersionWarning, NotFittedError
+from sklearn.exceptions import NotFittedError
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.utils.validation import check_is_fitted
@@ -151,19 +151,31 @@ def _validate_payload(payload: object) -> None:
             f"environment keys must be exactly {sorted(_ENVIRONMENT_KEYS)}, "
             f"got {sorted(repr(key) for key in environment)}"
         )
-    expected_versions = _current_environment()
     for key in _ENVIRONMENT_KEYS:
         value = environment[key]
         if not isinstance(value, str):
             raise ModelBundleError(
                 f"environment {key!r} must be a string, got {type(value).__name__}"
             )
-        if value != expected_versions[key]:
-            raise ModelBundleError(
-                f"environment {key!r} recorded {value!r} but current is "
-                f"{expected_versions[key]!r}"
-            )
     _validate_model(payload["model"])
+
+
+def _environment_difference(environment: dict[str, str], path: Path) -> str | None:
+    current = _current_environment()
+    differing = [
+        key for key in _ENVIRONMENT_KEYS if environment[key] != current[key]
+    ]
+    if not differing:
+        return None
+    lines = [f"T1 model environment differs for {path}:"]
+    lines.extend(
+        f"  {key}: recorded {environment[key]!r}, current {current[key]!r}"
+        for key in differing
+    )
+    lines.append(
+        "Attempting to use the loaded model; compatibility is not guaranteed."
+    )
+    return "\n".join(lines)
 
 
 def save_model_bundle(model: T1Model, path: Path) -> None:
@@ -286,23 +298,22 @@ def load_model_bundle(path: Path) -> T1Model:
     Only trusted, verified local artifacts should be loaded: joblib
     deserialization can execute arbitrary code, and the validation performed
     after loading does not protect against malicious artifacts or provide
-    unsupported cross-version compatibility.  See
+    unsupported cross-version compatibility.  If the recorded runtime
+    environment differs from the current one, a :class:`UserWarning` is
+    emitted listing the differing entries and the validated model is still
+    returned.  See
     https://scikit-learn.org/stable/model_persistence.html
     """
     try:
         with path.open("rb") as stream:
-            with warnings.catch_warnings():
-                warnings.filterwarnings("error", category=InconsistentVersionWarning)
-                payload = joblib.load(stream)
-    except InconsistentVersionWarning as exc:
-        raise ModelBundleError(
-            f"cannot load model bundle {path}: incompatible scikit-learn "
-            f"version: {exc}"
-        ) from exc
+            payload = joblib.load(stream)
     except (OSError, EOFError, pickle.UnpicklingError) as exc:
         raise ModelBundleError(f"cannot load model bundle {path}: {exc}") from exc
     try:
         _validate_payload(payload)
     except ModelBundleError as exc:
         raise ModelBundleError(f"invalid model bundle {path}: {exc}") from exc
+    difference = _environment_difference(payload["environment"], path)
+    if difference is not None:
+        warnings.warn(difference, stacklevel=2)
     return payload["model"]

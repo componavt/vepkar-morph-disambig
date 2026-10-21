@@ -63,6 +63,37 @@ def trained_model():
     return train_candidate_model([pos, neg])
 
 
+def assert_equivalent_model(loaded, reference):
+    assert isinstance(loaded, T1Model)
+    assert dict(loaded.vectorizer.vocabulary_) == dict(
+        reference.vectorizer.vocabulary_
+    )
+    np.testing.assert_array_equal(
+        loaded.vectorizer.get_feature_names_out(),
+        reference.vectorizer.get_feature_names_out(),
+    )
+    np.testing.assert_array_equal(
+        loaded.classifier.classes_, reference.classifier.classes_
+    )
+    assert loaded.classifier.classes_.tolist() == [0, 1]
+    assert loaded.classifier.C == reference.classifier.C
+    np.testing.assert_allclose(
+        loaded.classifier.coef_, reference.classifier.coef_
+    )
+    np.testing.assert_allclose(
+        loaded.classifier.intercept_, reference.classifier.intercept_
+    )
+    examples = [
+        make_example(dict(POS_FEATURES)),
+        make_example({'["gramset","UNKNOWN"]': 1.0}),
+        make_example(dict(NEG_FEATURES)),
+    ]
+    np.testing.assert_allclose(
+        score_candidate_examples(loaded, examples),
+        score_candidate_examples(reference, examples),
+    )
+
+
 def dump_payload(tmp_path, name, payload):
     path = tmp_path / name
     with path.open("wb") as fh:
@@ -93,36 +124,12 @@ class TestRoundTrip:
     def test_save_load_round_trip(self, tmp_path, trained_model):
         path = tmp_path / "model.bundle"
         save_model_bundle(trained_model, path)
-        loaded = load_model_bundle(path)
-        assert isinstance(loaded, T1Model)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            loaded = load_model_bundle(path)
+        assert caught == []
         assert loaded is not trained_model
-        assert dict(loaded.vectorizer.vocabulary_) == dict(
-            trained_model.vectorizer.vocabulary_
-        )
-        np.testing.assert_array_equal(
-            loaded.vectorizer.get_feature_names_out(),
-            trained_model.vectorizer.get_feature_names_out(),
-        )
-        np.testing.assert_array_equal(
-            loaded.classifier.classes_, trained_model.classifier.classes_
-        )
-        assert loaded.classifier.classes_.tolist() == [0, 1]
-        assert loaded.classifier.C == trained_model.classifier.C
-        np.testing.assert_allclose(
-            loaded.classifier.coef_, trained_model.classifier.coef_
-        )
-        np.testing.assert_allclose(
-            loaded.classifier.intercept_, trained_model.classifier.intercept_
-        )
-        examples = [
-            make_example(dict(POS_FEATURES)),
-            make_example({'["gramset","UNKNOWN"]': 1.0}),
-            make_example(dict(NEG_FEATURES)),
-        ]
-        np.testing.assert_allclose(
-            score_candidate_examples(loaded, examples),
-            score_candidate_examples(trained_model, examples),
-        )
+        assert_equivalent_model(loaded, trained_model)
 
     def test_independent_joblib_read_of_payload(self, tmp_path, trained_model):
         path = tmp_path / "model.bundle"
@@ -336,10 +343,11 @@ def _env_non_string(base):
     return payload
 
 
-def _env_wrong_version(base):
+def _env_changed(base, *keys, value="9.9.9"):
     payload = dict(base)
     environment = dict(base["environment"])
-    environment["scikit-learn"] = "0.0.0"
+    for key in keys:
+        environment[key] = value
     payload["environment"] = environment
     return payload
 
@@ -378,7 +386,6 @@ class TestLoadValidation:
             ("env-missing-key", _env_missing_key),
             ("env-extra-key", _env_extra_key),
             ("env-non-string", _env_non_string),
-            ("env-wrong-version", _env_wrong_version),
             ("top-level-numeric-key", _payload_with_numeric_key),
             ("environment-numeric-key", _env_with_numeric_key),
         ],
@@ -455,6 +462,8 @@ class TestLoadErrors:
     def test_controlled_inconsistent_version_warning(self, tmp_path, trained_model, monkeypatch):
         path = tmp_path / "model.bundle"
         save_model_bundle(trained_model, path)
+        with path.open("rb") as fh:
+            base = joblib.load(fh)
 
         def warning_load(stream):
             warnings.warn(
@@ -464,14 +473,85 @@ class TestLoadErrors:
                     original_sklearn_version="0.0.0",
                 )
             )
-            return {"format": "unreachable"}
+            return base
 
         monkeypatch.setattr(model_io.joblib, "load", warning_load)
         filters_before = list(warnings.filters)
-        with pytest.raises(ModelBundleError) as exc_info:
-            load_model_bundle(path)
-        assert str(path) in str(exc_info.value)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            loaded = load_model_bundle(path)
+        assert isinstance(loaded, T1Model)
+        assert any(
+            isinstance(item.message, InconsistentVersionWarning) for item in caught
+        )
         assert warnings.filters == filters_before
+
+
+_ENVIRONMENT_KEYS = ("python", "numpy", "scipy", "scikit-learn", "joblib")
+
+
+def _app_warnings(caught):
+    return [
+        item
+        for item in caught
+        if str(item.message).startswith("T1 model environment differs")
+    ]
+
+
+class TestEnvironmentWarning:
+    def _changed_payload(self, tmp_path, trained_model, *keys):
+        saved = tmp_path / "saved.bundle"
+        save_model_bundle(trained_model, saved)
+        with saved.open("rb") as fh:
+            base = joblib.load(fh)
+        return _env_changed(base, *keys)
+
+    @pytest.mark.parametrize("key", _ENVIRONMENT_KEYS)
+    def test_single_recorded_version_change_warns_and_loads(
+        self, tmp_path, trained_model, key
+    ):
+        payload = self._changed_payload(tmp_path, trained_model, key)
+        path = dump_payload(tmp_path, f"env-{key}.bundle", payload)
+        before_bytes = path.read_bytes()
+        before_entries = sorted(p.name for p in tmp_path.iterdir())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            loaded = load_model_bundle(path)
+        app = _app_warnings(caught)
+        assert len(app) == 1
+        message = str(app[0].message)
+        current = model_io._current_environment()[key]
+        assert str(path) in message
+        assert f"  {key}: recorded '9.9.9', current {current!r}" in message
+        assert "Attempting to use the loaded model; compatibility is not guaranteed." in message
+        assert isinstance(loaded, T1Model)
+        assert path.read_bytes() == before_bytes
+        assert sorted(p.name for p in tmp_path.iterdir()) == before_entries
+
+    def test_multiple_changes_yield_one_warning_with_only_differences(
+        self, tmp_path, trained_model
+    ):
+        payload = self._changed_payload(
+            tmp_path, trained_model, "numpy", "scikit-learn", "joblib"
+        )
+        path = dump_payload(tmp_path, "env-multi.bundle", payload)
+        filters_before = list(warnings.filters)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            loaded = load_model_bundle(path)
+        app = _app_warnings(caught)
+        assert len(app) == 1
+        assert isinstance(loaded, T1Model)
+        message = str(app[0].message)
+        current = model_io._current_environment()
+        assert str(path) in message
+        for key in ("numpy", "scikit-learn", "joblib"):
+            assert f"  {key}: recorded '9.9.9', current {current[key]!r}" in message
+        for key in ("python", "scipy"):
+            assert f"  {key}: recorded" not in message
+        assert "Attempting to use the loaded model; compatibility is not guaranteed." in message
+        assert warnings.filters == filters_before
+        assert_equivalent_model(loaded, trained_model)
 
 
 class TestDestinationProtection:
