@@ -27,10 +27,7 @@ from t1_features.run_context import T1RunContextError, load_t1_run_context
 
 def _run_predict_t1(args: argparse.Namespace) -> int:
     try:
-        context = load_t1_run_context(
-            args.run_dir,
-            strict_code=args.strict_code,
-        )
+        context = load_t1_run_context(args.run_dir)
     except T1RunContextError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

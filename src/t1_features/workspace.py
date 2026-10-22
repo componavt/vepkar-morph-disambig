@@ -1,10 +1,10 @@
-"""Create a fresh T1 run directory and publish its version-2 passport.
+"""Create a fresh T1 run directory and publish its version-4 passport.
 
-The run directory is created only after all recorded observations (Git
-snapshots, split fingerprint, parameters) have been collected successfully;
-the passport is then published into the directory as ``run.json``.
-Preparation never loads corpus tables and never modifies the code or data
-checkouts.
+The run directory is created only after all recorded observations (data
+repository snapshot, split fingerprint, parameters) have been collected
+successfully; the passport is then published into the directory as
+``run.json``.  Preparation never loads corpus tables and never modifies the
+data checkout.
 """
 
 from __future__ import annotations
@@ -155,7 +155,6 @@ def create_t1_run(
         ) from exc
     try:
         manifest = collect_run_manifest(
-            code_dir=config.repo_root,
             data_dir=data_dir,
             data_tag=tag,
             split_file=split_path,

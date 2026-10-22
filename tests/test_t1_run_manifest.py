@@ -166,9 +166,8 @@ def _created_run_dir(captured) -> Path:
 def _stable_manifest() -> dict:
     return {
         "format": "vepkar-t1-run",
-        "format_version": 3,
+        "format_version": 4,
         "stage": "prepared",
-        "code": {"root": "/code", "commit": "c" * 40},
         "data": {
             "root": "/data",
             "tag": "v2026.09",
@@ -179,9 +178,8 @@ def _stable_manifest() -> dict:
     }
 
 
-def _collect(code, data, split, C=1.0):
+def _collect(data, split, C=1.0):
     return collect_run_manifest(
-        code_dir=code,
         data_dir=data,
         data_tag="v2026.09",
         split_file=split,
@@ -255,19 +253,16 @@ def test_prepare_t1_run_help_describes_optional_run_dir(capsys):
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestCollectSchema:
     def test_exact_schema_commits_tag_paths_and_sha256(self, tmp_path):
-        code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _split_file(tmp_path)
 
         manifest = collect_run_manifest(
-            code_dir=code,
             data_dir=data,
             data_tag="v2026.09",
             split_file=split,
             C=2.5,
         )
 
-        code_commit = _git(code, "rev-parse", "HEAD").stdout.strip()
         data_commit = _git(data, "rev-parse", "HEAD").stdout.strip()
         expected_sha256 = hashlib.sha256(split.read_bytes()).hexdigest()
 
@@ -275,19 +270,13 @@ class TestCollectSchema:
             "format",
             "format_version",
             "stage",
-            "code",
             "data",
             "split",
             "parameters",
         ]
         assert manifest["format"] == "vepkar-t1-run"
-        assert manifest["format_version"] == 3
+        assert manifest["format_version"] == 4
         assert manifest["stage"] == "prepared"
-        assert list(manifest["code"]) == ["root", "commit"]
-        assert manifest["code"] == {
-            "root": str(code.resolve()),
-            "commit": code_commit,
-        }
         assert list(manifest["data"]) == ["root", "tag", "commit"]
         assert manifest["data"] == {
             "root": str(data.resolve()),
@@ -304,54 +293,41 @@ class TestCollectSchema:
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestSplitFingerprint:
     def test_bytes_change_changes_fingerprint_but_moves_preserve_it(self, tmp_path):
-        code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
         first = _split_file(tmp_path, "first.csv", "language,text_id,split\nvep,1,dev\n")
         moved = _split_file(tmp_path, "second.csv", "language,text_id,split\nvep,1,dev\n")
         digest = hashlib.sha256(first.read_bytes()).hexdigest()
 
-        first_manifest = _collect(code, data, first)
-        moved_manifest = _collect(code, data, moved)
+        first_manifest = _collect(data, first)
+        moved_manifest = _collect(data, moved)
         assert first_manifest["split"]["sha256"] == digest
         assert moved_manifest["split"]["sha256"] == digest
         assert first_manifest["split"]["path"] == str(first.resolve())
         assert moved_manifest["split"]["path"] == str(moved.resolve())
 
         changed = _split_file(tmp_path, "third.csv", "language,text_id,split\nvep,1,test\n")
-        changed_manifest = _collect(code, data, changed)
+        changed_manifest = _collect(data, changed)
         assert changed_manifest["split"]["sha256"] != digest
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
-class TestRepoIsolation:
-    def test_code_and_data_records_are_independent(self, tmp_path):
-        code = _repo(tmp_path, "code", {"README.md": "code repo\n"})
-        data = _repo(tmp_path, "data", {"README.md": "data repo fetched\n"})
-        _git(data, "tag", "v2026.09")
+class TestDataRepoRequirements:
+    def test_data_repository_root_and_commit_recorded(self, tmp_path):
+        data = _tagged_data_repo(tmp_path)
         split = _split_file(tmp_path)
 
-        manifest = _collect(code, data, split)
-        assert manifest["code"]["root"] == str(code.resolve())
-        assert manifest["code"]["commit"] == _git(code, "rev-parse", "HEAD").stdout.strip()
+        manifest = _collect(data, split)
         assert manifest["data"]["root"] == str(data.resolve())
         assert manifest["data"]["commit"] == _git(data, "rev-parse", "HEAD").stdout.strip()
 
     def test_non_root_directory_rejected(self, tmp_path):
-        code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _split_file(tmp_path)
-        inside = code / "src"
+        inside = data / "corpus"
         with pytest.raises(RunManifestError) as exc_info:
-            _collect(code, inside, split)
+            _collect(inside, split)
         assert "not the intended repository root" in str(exc_info.value)
         assert str(inside) in str(exc_info.value)
-
-    def test_same_repository_for_code_and_data_rejected(self, tmp_path):
-        code = _valid_code_repo(tmp_path)
-        split = _split_file(tmp_path)
-        with pytest.raises(RunManifestError) as exc_info:
-            _collect(code, code, split)
-        assert "separate repositories" in str(exc_info.value)
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
@@ -400,9 +376,7 @@ class TestPrepareT1RunCommand:
             split.read_bytes()
         ).hexdigest()
         assert manifest["parameters"] == {"C": 0.5, "target_split": "dev"}
-        code_commit = _git(code, "rev-parse", "HEAD").stdout.strip()
-        assert manifest["code"]["commit"] == code_commit
-        assert manifest["code"]["root"] == str(code)
+        assert "code" not in manifest
         assert "Data tag: v2026.09" in captured.out
         assert "C: 0.5" in captured.out
         assert "Target split: dev" in captured.out
@@ -931,7 +905,6 @@ class TestGitLaunchFailure:
     def test_launch_failure_wrapped_with_root_operation_and_cause(
         self, tmp_path, monkeypatch, error
     ):
-        code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _split_file(tmp_path)
 
@@ -940,10 +913,10 @@ class TestGitLaunchFailure:
 
         monkeypatch.setattr(subprocess, "run", raising_run)
         with pytest.raises(RunManifestError) as exc_info:
-            _collect(code, data, split)
+            _collect(data, split)
         message = str(exc_info.value)
         assert "cannot run Git" in message
-        assert str(code) in message
+        assert str(data) in message
         assert "rev-parse" in message
         assert "simulated git launch denial" in message
         assert isinstance(exc_info.value.__cause__, error)
@@ -954,10 +927,8 @@ class TestNonMutatingGitObservation:
     def test_collection_records_identities_with_rev_parse_only(
         self, tmp_path, monkeypatch
     ):
-        code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _split_file(tmp_path)
-        code_commit = _git(code, "rev-parse", "HEAD").stdout.strip()
         data_commit = _git(data, "rev-parse", "HEAD").stdout.strip()
         original_run = subprocess.run
         invocations = []
@@ -967,20 +938,18 @@ class TestNonMutatingGitObservation:
             return original_run(command, *args, **kwargs)
 
         monkeypatch.setattr(subprocess, "run", spy_run)
-        manifest = _collect(code, data, split)
-        assert manifest["code"]["root"] == str(code.resolve())
-        assert manifest["code"]["commit"] == code_commit
+        manifest = _collect(data, split)
         assert manifest["data"]["root"] == str(data.resolve())
         assert manifest["data"]["commit"] == data_commit
         git_calls = [cmd for cmd in invocations if cmd and cmd[0] == "git"]
-        assert len(git_calls) == 4
+        assert len(git_calls) == 2
         assert all(
             command[1] == "--no-optional-locks"
             and command[2] == "-C"
-            and (str(code) in command or str(data) in command)
+            and str(data) in command
             for command in git_calls
         )
-        assert [command[4] for command in git_calls] == ["rev-parse"] * 4
+        assert [command[4] for command in git_calls] == ["rev-parse"] * 2
         assert not any(
             "status" in argument
             for command in git_calls
@@ -1039,16 +1008,19 @@ class TestLoadNonMutating:
 class TestLoadVersionRejection:
     @pytest.mark.parametrize(
         "version",
-        [1, 2, 0, -1, "2", "3", 2.0, 3.0, None, True],
+        [1, 2, 3, 0, -1, "2", "3", "4", 2.0, 3.0, 4.0, None, True],
         ids=[
             "v1",
             "v2",
+            "v3",
             "zero",
             "negative",
             "string-two",
             "string-three",
+            "string-four",
             "float-two",
             "float-three",
+            "float-four",
             "null",
             "boolean",
         ],
@@ -1061,9 +1033,13 @@ class TestLoadVersionRejection:
             load_run_manifest(output)
         assert "format_version" in str(exc_info.value)
 
-    def test_format_version_3_accepted(self, tmp_path):
-        output = _write_raw(tmp_path, _stable_manifest())
-        assert load_run_manifest(output)["format_version"] == 3
+    def test_old_version_3_manifest_rejected(self, tmp_path):
+        manifest = _stable_manifest()
+        manifest["format_version"] = 3
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "format_version" in str(exc_info.value)
 
 
 class TestSchemaRejection:
@@ -1072,11 +1048,10 @@ class TestSchemaRejection:
         [
             ("parameters",),
             ("split", "sha256"),
-            ("code", "commit"),
             ("data", "tag"),
             ("stage",),
         ],
-        ids=["top-level", "split", "code", "data", "stage"],
+        ids=["top-level", "split", "data", "stage"],
     )
     def test_missing_keys_rejected(self, tmp_path, drop_path):
         manifest = _drop_key(_stable_manifest(), *drop_path)
@@ -1089,12 +1064,11 @@ class TestSchemaRejection:
         "key_path",
         [
             ("surprise",),
-            ("code", "surprise"),
             ("data", "surprise"),
             ("split", "surprise"),
             ("parameters", "surprise"),
         ],
-        ids=["top-level", "code", "data", "split", "parameters"],
+        ids=["top-level", "data", "split", "parameters"],
     )
     def test_extra_keys_rejected(self, tmp_path, key_path):
         manifest = _set_key(_stable_manifest(), *key_path, value=1)
@@ -1103,15 +1077,23 @@ class TestSchemaRejection:
             load_run_manifest(output)
         assert "unexpected keys" in str(exc_info.value)
 
+    def test_extra_code_section_rejected(self, tmp_path):
+        manifest = _stable_manifest()
+        manifest["code"] = {"root": "/code", "commit": "c" * 40}
+        output = _write_raw(tmp_path, manifest)
+        with pytest.raises(RunManifestError) as exc_info:
+            load_run_manifest(output)
+        assert "unexpected keys" in str(exc_info.value)
+        assert "code" in str(exc_info.value)
+
     @pytest.mark.parametrize(
         "key_path",
         [
-            ("code",),
             ("data",),
             ("split",),
             ("parameters",),
         ],
-        ids=["code", "data", "split", "parameters"],
+        ids=["data", "split", "parameters"],
     )
     def test_non_mapping_sections_rejected(self, tmp_path, key_path):
         manifest = _set_key(_stable_manifest(), *key_path, value=["not", "a", "mapping"])
@@ -1133,9 +1115,6 @@ class TestSchemaRejection:
         [
             lambda manifest: _set_key(manifest, "format", value="other"),
             lambda manifest: _set_key(manifest, "stage", value="done"),
-            lambda manifest: _set_key(manifest, "code", "root", value=7),
-            lambda manifest: _set_key(manifest, "code", "root", value=""),
-            lambda manifest: _set_key(manifest, "code", "commit", value=""),
             lambda manifest: _set_key(manifest, "data", "tag", value=""),
             lambda manifest: _set_key(manifest, "split", "path", value=""),
             lambda manifest: _set_key(manifest, "parameters", "target_split", value="train"),
@@ -1143,9 +1122,6 @@ class TestSchemaRejection:
         ids=[
             "wrong-format",
             "wrong-stage",
-            "numeric-root",
-            "empty-root",
-            "empty-commit",
             "empty-tag",
             "empty-split-path",
             "wrong-target-split",
@@ -1223,7 +1199,6 @@ class TestCollectRejectsInvalidCBeforeRepoAccess:
     def test_invalid_C_rejected_before_repository_access(
         self, tmp_path, monkeypatch, C
     ):
-        code = _valid_code_repo(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _split_file(tmp_path)
         calls = []
@@ -1234,7 +1209,7 @@ class TestCollectRejectsInvalidCBeforeRepoAccess:
 
         monkeypatch.setattr(run_manifest, "_repository_root", raising_root)
         with pytest.raises(RunManifestError) as exc_info:
-            _collect(code, data, split, C=C)
+            _collect(data, split, C=C)
         assert "C" in str(exc_info.value)
         assert calls == []
 

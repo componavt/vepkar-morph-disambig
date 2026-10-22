@@ -100,9 +100,8 @@ def _data_repo(tmp_path: Path) -> Path:
 def _stable_manifest() -> dict:
     return {
         "format": "vepkar-t1-run",
-        "format_version": 3,
+        "format_version": 4,
         "stage": "prepared",
-        "code": {"root": "/code", "commit": "c" * 40},
         "data": {
             "root": "/data",
             "tag": _TAG,
@@ -126,7 +125,6 @@ def _prepared_run(tmp_path: Path, monkeypatch):
     split = tmp_path / "splits.csv"
     split.write_text(_SPLIT_CONTENT, encoding="utf-8")
     manifest = collect_run_manifest(
-        code_dir=code,
         data_dir=data,
         data_tag=_TAG,
         split_file=split,
@@ -135,17 +133,15 @@ def _prepared_run(tmp_path: Path, monkeypatch):
     run_dir = tmp_path / "runs" / "run-a"
     run_dir.mkdir(parents=True)
     _write_passport(run_dir, manifest)
-    monkeypatch.setattr(run_context, "_PROJECT_ROOT", code)
     return code, data, split, manifest, run_dir
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestLoadT1RunContext:
-    def test_matching_identities_return_exact_manifest_run_path_and_code_commit(
+    def test_matching_identities_return_exact_manifest_and_run_path(
         self, tmp_path, monkeypatch
     ):
         code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
-        expected_commit = _git(code, "rev-parse", "HEAD").stdout.strip()
 
         context = load_t1_run_context(run_dir)
 
@@ -153,12 +149,11 @@ class TestLoadT1RunContext:
         assert context.run_dir == run_dir.resolve()
         assert context.run_dir.is_absolute()
         assert context.manifest == manifest
-        assert context.manifest["code"]["commit"] == expected_commit
+        assert "code" not in context.manifest
         assert context.manifest["data"]["tag"] == _TAG
         assert context.manifest["data"]["commit"] == _git(
             data, "rev-parse", "HEAD"
         ).stdout.strip()
-        assert context.current_code_commit == expected_commit
 
     def test_relative_and_tilde_run_paths_resolve(self, tmp_path, monkeypatch):
         code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
@@ -184,58 +179,38 @@ class TestLoadT1RunContext:
         context = load_t1_run_context(run_dir)
 
         assert context.manifest == manifest
-        assert context.current_code_commit == manifest["code"]["commit"]
 
-    def test_new_code_commit_warns_and_returns_by_default(
-        self, tmp_path, monkeypatch
-    ):
+    def test_no_source_code_git_identity_queried(self, tmp_path, monkeypatch):
         code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
-        (code / "src" / "two.py").write_text("print(2)\n", encoding="utf-8")
-        _commit_all(code, "second commit")
-        new_commit = _git(code, "rev-parse", "HEAD").stdout.strip()
+        original_run = subprocess.run
+        invocations = []
 
-        with pytest.warns(UserWarning) as records:
-            context = load_t1_run_context(run_dir)
+        def spy_run(command, *args, **kwargs):
+            invocations.append(command)
+            return original_run(command, *args, **kwargs)
 
-        assert len(records) == 1
-        message = str(records[0].message)
-        assert str(run_dir.resolve()) in message
-        assert manifest["code"]["commit"] in message
-        assert new_commit in message
-        assert "may continue" in message
-        assert context.current_code_commit == new_commit
-        assert context.manifest == manifest
-        assert context.run_dir == run_dir.resolve()
-
-    def test_new_code_commit_with_strict_code_warns_and_raises(
-        self, tmp_path, monkeypatch
-    ):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
-        (code / "src" / "two.py").write_text("print(2)\n", encoding="utf-8")
-        _commit_all(code, "second commit")
-        new_commit = _git(code, "rev-parse", "HEAD").stdout.strip()
-
-        with pytest.warns(UserWarning) as records:
-            with pytest.raises(T1RunContextError) as exc_info:
-                load_t1_run_context(run_dir, strict_code=True)
-
-        assert len(records) == 1
-        message = str(exc_info.value)
-        assert "strict" in message.lower()
-        assert "refusal" in message.lower()
-        assert manifest["code"]["commit"] in message
-        assert new_commit in message
-        assert isinstance(exc_info.value, ValueError)
-
-    def test_matching_code_emits_no_application_warning(
-        self, tmp_path, monkeypatch, recwarn
-    ):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+        monkeypatch.setattr(subprocess, "run", spy_run)
 
         context = load_t1_run_context(run_dir)
 
-        assert context.current_code_commit == manifest["code"]["commit"]
-        assert len(recwarn) == 0
+        assert context.manifest == manifest
+        git_calls = [cmd for cmd in invocations if cmd and cmd[0] == "git"]
+        assert git_calls
+        for command in git_calls:
+            try:
+                target_index = command.index("-C") + 1
+            except ValueError:
+                continue
+            target = Path(command[target_index]).resolve()
+            assert target != code.resolve()
+        operations = []
+        for command in git_calls:
+            try:
+                c_index = command.index("-C")
+            except ValueError:
+                continue
+            operations.append(command[c_index + 2])
+        assert "rev-parse" in operations
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")

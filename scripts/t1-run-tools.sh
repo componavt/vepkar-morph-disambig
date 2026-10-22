@@ -180,7 +180,7 @@ if not path.is_file():
 expected = json.loads(path.read_text(encoding='utf-8'))
 data, tag = _preflight_benchmark(Path(os.environ['DATA']))
 current = collect_run_manifest(
-    code_dir=repo, data_dir=data, data_tag=tag,
+    data_dir=data, data_tag=tag,
     split_file=Path(os.environ['SPLIT']), C=float(os.environ['C']),
 )
 changed = [key for key in sorted(set(expected) | set(current))

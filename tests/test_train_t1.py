@@ -138,9 +138,8 @@ def _write_passport(run_dir, *, data_root, tag, split_path, C=1.0):
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "format": "vepkar-t1-run",
-        "format_version": 3,
+        "format_version": 4,
         "stage": "prepared",
-        "code": {"root": "/code", "commit": "c" * 40},
         "data": {
             "root": str(data_root),
             "tag": tag,
@@ -157,15 +156,14 @@ def _write_passport(run_dir, *, data_root, tag, split_path, C=1.0):
 
 
 def _stub_run_context(monkeypatch, run_dir, manifest):
-    recorded = {}
+    recorded = {"calls": 0}
 
-    def fake_load(run_dir_arg, *, strict_code=False):
+    def fake_load(run_dir_arg):
+        recorded["calls"] += 1
         recorded["run_dir"] = run_dir_arg
-        recorded["strict_code"] = strict_code
         return T1RunContext(
             run_dir=run_dir.resolve(),
             manifest=manifest,
-            current_code_commit=manifest["code"]["commit"],
         )
 
     monkeypatch.setattr(train_pkg, "load_t1_run_context", fake_load)
@@ -258,13 +256,13 @@ def test_train_t1_success_via_cli_main(
     split_before = split_file.read_bytes()
     passport_before = (run_dir / "run.json").read_bytes()
     status = cli.main(
-        ["train-t1", "--run-dir", str(run_dir), "--strict-code"]
+        ["train-t1", "--run-dir", str(run_dir)]
     )
     captured = capsys.readouterr()
     assert status == 0, captured.err
     assert captured.err == ""
+    assert recorded["calls"] == 1
     assert recorded["run_dir"] == run_dir
-    assert recorded["strict_code"] is True
     assert captured.out.splitlines()[0] == "T1 training: OK"
     assert f"Run directory: {run_dir.resolve()}" in captured.out
     assert "Data tag: fixture-tag" in captured.out
@@ -294,27 +292,24 @@ def test_train_t1_success_via_cli_main(
     assert (run_dir / "run.json").read_bytes() == passport_before
 
 
-def test_train_t1_strict_code_defaults_to_false(
-    tmp_path, monkeypatch, capsys
-):
-    _install_tables(monkeypatch)
-    data_dir, split_file, run_dir, manifest = _success_env(tmp_path)
-    recorded = _stub_run_context(monkeypatch, run_dir, manifest)
-    status = cli.main(["train-t1", "--run-dir", str(run_dir)])
-    captured = capsys.readouterr()
-    assert status == 0, captured.err
-    assert recorded["strict_code"] is False
-
-
 def test_train_t1_help_lists_arguments(capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(["train-t1", "--help"])
     captured = capsys.readouterr()
     assert exc.value.code == 0
     assert "--run-dir" in captured.out
-    assert "--strict-code" in captured.out
+    assert "--strict-code" not in captured.out
     for removed in ("--output", "--C", "--data-dir", "--split-file"):
         assert removed not in captured.out
+
+
+def test_train_t1_rejects_strict_code(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["train-t1", "--run-dir", str(tmp_path), "--strict-code"])
+    captured = capsys.readouterr()
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in captured.err
+    assert "--strict-code" in captured.err
 
 
 def test_train_t1_requires_run_dir(capsys):
@@ -350,7 +345,7 @@ def test_train_t1_rejects_removed_and_unsupported_options(
 def test_train_t1_context_error_reported(tmp_path, monkeypatch, capsys):
     _forbid_pipeline(monkeypatch)
 
-    def fail_load(run_dir_arg, *, strict_code=False):
+    def fail_load(run_dir_arg):
         raise T1RunContextError(
             f"cannot load T1 run passport {run_dir_arg / 'run.json'}: missing"
         )
@@ -363,32 +358,6 @@ def test_train_t1_context_error_reported(tmp_path, monkeypatch, capsys):
     assert status == 1
     assert "cannot load T1 run passport" in captured.err
     assert str(run_dir / "run.json") in captured.err
-    assert not (run_dir / "model.bundle").exists()
-    assert "T1 training: OK" not in captured.out
-
-
-def test_train_t1_strict_code_refusal_reported(tmp_path, monkeypatch, capsys):
-    _forbid_pipeline(monkeypatch)
-    recorded = {}
-
-    def fail_load(run_dir_arg, *, strict_code=False):
-        recorded["strict_code"] = strict_code
-        raise T1RunContextError(
-            f"T1 run {run_dir_arg.resolve()}: strict-code refusal: recorded "
-            f"code commit does not match current code commit"
-        )
-
-    monkeypatch.setattr(train_pkg, "load_t1_run_context", fail_load)
-    run_dir = tmp_path / "run-a"
-    run_dir.mkdir()
-    status = cli.main(
-        ["train-t1", "--run-dir", str(run_dir), "--strict-code"]
-    )
-    captured = capsys.readouterr()
-    assert recorded["strict_code"] is True
-    assert status == 1
-    assert "strict-code refusal" in captured.err
-    assert str(run_dir.resolve()) in captured.err
     assert not (run_dir / "model.bundle").exists()
     assert "T1 training: OK" not in captured.out
 

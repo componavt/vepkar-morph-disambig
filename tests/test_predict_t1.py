@@ -208,9 +208,8 @@ def _write_passport(run_dir, *, data_root, tag, split_path):
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "format": "vepkar-t1-run",
-        "format_version": 3,
+        "format_version": 4,
         "stage": "prepared",
-        "code": {"root": "/code", "commit": "c" * 40},
         "data": {
             "root": str(data_root),
             "tag": tag,
@@ -229,14 +228,12 @@ def _write_passport(run_dir, *, data_root, tag, split_path):
 def _stub_run_context(monkeypatch, run_dir, manifest):
     recorded = {"calls": 0}
 
-    def fake_load(run_dir_arg, *, strict_code=False):
+    def fake_load(run_dir_arg):
         recorded["calls"] += 1
         recorded["run_dir"] = run_dir_arg
-        recorded["strict_code"] = strict_code
         return T1RunContext(
             run_dir=run_dir.resolve(),
             manifest=manifest,
-            current_code_commit=manifest["code"]["commit"],
         )
 
     monkeypatch.setattr(predict_pkg, "load_t1_run_context", fake_load)
@@ -299,7 +296,7 @@ class TestArgumentParsing:
         captured = capsys.readouterr()
         assert exc.value.code == 0
         assert "--run-dir" in captured.out
-        assert "--strict-code" in captured.out
+        assert "--strict-code" not in captured.out
         for removed in ("--model", "--split", "--output", "--data-dir", "--split-file"):
             assert removed not in captured.out
 
@@ -311,14 +308,13 @@ class TestArgumentParsing:
         assert "required" in captured.err
         assert "--run-dir" in captured.err
 
-    def test_strict_code_defaults_to_false(self, tmp_path, monkeypatch, capsys):
-        _install_tables(monkeypatch)
-        data_dir, split_file, run_dir, manifest, bundle = _success_env(tmp_path)
-        recorded = _stub_run_context(monkeypatch, run_dir, manifest)
-        status = cli.main(["predict-t1", "--run-dir", str(run_dir)])
+    def test_rejects_strict_code(self, tmp_path, capsys):
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["predict-t1", "--run-dir", str(tmp_path), "--strict-code"])
         captured = capsys.readouterr()
-        assert status == 0, captured.err
-        assert recorded["strict_code"] is False
+        assert exc.value.code == 2
+        assert "unrecognized arguments" in captured.err
+        assert "--strict-code" in captured.err
 
     @pytest.mark.parametrize(
         "removed",
@@ -357,7 +353,7 @@ class TestContextFailure:
         _forbid_stage_call(monkeypatch, "write_dev_predictions")
         run_dir = tmp_path / "runs" / "run-a"
 
-        def fail_load(run_dir_arg, *, strict_code=False):
+        def fail_load(run_dir_arg):
             raise T1RunContextError(
                 f"cannot load T1 run passport {run_dir_arg / 'run.json'}: missing"
             )
@@ -368,32 +364,6 @@ class TestContextFailure:
         assert status == 1
         assert "cannot load T1 run passport" in captured.err
         assert str(run_dir / "run.json") in captured.err
-        assert not (run_dir / "dev.csv").exists()
-        assert "T1 prediction: OK" not in captured.out
-
-    def test_strict_code_refusal_reported(self, tmp_path, monkeypatch, capsys):
-        _forbid_model_load(monkeypatch)
-        _forbid_corpus(monkeypatch)
-        _forbid_stage_call(monkeypatch, "load_t1_inputs")
-        recorded = {}
-
-        def fail_load(run_dir_arg, *, strict_code=False):
-            recorded["strict_code"] = strict_code
-            raise T1RunContextError(
-                f"T1 run {run_dir_arg.resolve()}: strict-code refusal: recorded "
-                f"code commit does not match current code commit"
-            )
-
-        monkeypatch.setattr(predict_pkg, "load_t1_run_context", fail_load)
-        run_dir = tmp_path / "runs" / "run-a"
-        status = cli.main(
-            ["predict-t1", "--run-dir", str(run_dir), "--strict-code"]
-        )
-        captured = capsys.readouterr()
-        assert recorded["strict_code"] is True
-        assert status == 1
-        assert "strict-code refusal" in captured.err
-        assert str(run_dir.resolve()) in captured.err
         assert not (run_dir / "dev.csv").exists()
         assert "T1 prediction: OK" not in captured.out
 
@@ -643,7 +613,7 @@ class TestSuccessfulPrediction:
         monkeypatch.setattr(predict_pkg, "load_model_bundle", guarded_load_model)
 
         status = cli.main(
-            ["predict-t1", "--run-dir", str(run_dir), "--strict-code"]
+            ["predict-t1", "--run-dir", str(run_dir)]
         )
         captured = capsys.readouterr()
         output = run_dir / "dev.csv"
@@ -662,7 +632,6 @@ class TestSuccessfulPrediction:
         assert "Validation: OK" in captured.out
         assert recorded["calls"] == 1
         assert recorded["run_dir"] == run_dir
-        assert recorded["strict_code"] is True
 
         header, raw_rows = _read_csv(output)
         assert header == list(PREDICTION_HEADER)

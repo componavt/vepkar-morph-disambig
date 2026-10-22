@@ -1,7 +1,7 @@
 """Record provenance and intended settings of a forthcoming T1 dev experiment.
 
 This module prepares metadata only.  It does not train, predict, or
-evaluate.  All observations (repository identities, split fingerprint,
+evaluate.  All observations (data repository identity, split fingerprint,
 parameters) are collected *before* the passport file itself is created, so
 the recorded state never contains the passport.  The split SHA-256
 fingerprints the raw file bytes, not semantic split equivalence.
@@ -20,7 +20,7 @@ import tempfile
 from pathlib import Path
 
 _FORMAT_NAME = "vepkar-t1-run"
-_FORMAT_VERSION = 3
+_FORMAT_VERSION = 4
 _STAGE = "prepared"
 _TARGET_SPLIT = "dev"
 _TEMP_PREFIX = ".vepkar-t1-run-"
@@ -31,12 +31,10 @@ _TOP_LEVEL_KEYS = (
     "format",
     "format_version",
     "stage",
-    "code",
     "data",
     "split",
     "parameters",
 )
-_CODE_KEYS = ("root", "commit")
 _DATA_KEYS = ("root", "tag", "commit")
 _SPLIT_KEYS = ("path", "sha256")
 _PARAMETER_KEYS = ("C", "target_split")
@@ -106,7 +104,7 @@ def _validate_positive_finite(value) -> None:
 
 
 def _validate_manifest(manifest: object) -> None:
-    """Require the exact version-3 T1 run passport schema."""
+    """Require the exact version-4 T1 run passport schema."""
     if not isinstance(manifest, dict):
         raise RunManifestError("invalid run manifest: expected a dictionary")
     _require_keys(manifest, _TOP_LEVEL_KEYS, "manifest")
@@ -128,9 +126,6 @@ def _validate_manifest(manifest: object) -> None:
             f"invalid run manifest: stage must be {_STAGE!r}, "
             f"got {manifest['stage']!r}"
         )
-    code = _require_mapping(manifest["code"], "manifest.code")
-    _require_keys(code, _CODE_KEYS, "manifest.code")
-    _validate_repo(code, "manifest.code", has_tag=False)
     data = _require_mapping(manifest["data"], "manifest.data")
     _require_keys(data, _DATA_KEYS, "manifest.data")
     _validate_repo(data, "manifest.data", has_tag=True)
@@ -213,7 +208,6 @@ def _split_sha256(path: Path) -> str:
 
 def collect_run_manifest(
     *,
-    code_dir: Path,
     data_dir: Path,
     data_tag: str,
     split_file: Path,
@@ -221,13 +215,7 @@ def collect_run_manifest(
 ) -> dict:
     """Collect all recorded observations into one prepared run passport."""
     _validate_positive_finite(C)
-    code_root = _repository_root(code_dir)
     data_root = _repository_root(data_dir)
-    if code_root == data_root:
-        raise RunManifestError(
-            f"code and data must be separate repositories; both are {code_root}"
-        )
-    code = _git_snapshot(code_root)
     data_snapshot = _git_snapshot(data_root)
     data = {
         "root": data_snapshot["root"],
@@ -238,7 +226,6 @@ def collect_run_manifest(
         "format": _FORMAT_NAME,
         "format_version": _FORMAT_VERSION,
         "stage": _STAGE,
-        "code": code,
         "data": data,
         "split": {
             "path": str(split_file.resolve()),

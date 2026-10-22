@@ -135,7 +135,7 @@ class TestAutomaticCreation:
         assert re.fullmatch(r"[A-Za-z0-9_]+", created.name[len(label) :])
         assert sorted(p.name for p in created.iterdir()) == ["run.json"]
         manifest = load_run_manifest(created / "run.json")
-        assert manifest["format_version"] == 3
+        assert manifest["format_version"] == 4
         assert manifest["stage"] == "prepared"
         assert manifest["parameters"]["C"] == C
         assert manifest["parameters"]["target_split"] == "dev"

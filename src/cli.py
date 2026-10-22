@@ -224,12 +224,6 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Existing prepared T1 run directory",
     )
-    train_t1.add_argument(
-        "--strict-code",
-        action="store_true",
-        default=False,
-        help="Refuse to train when the current code commit differs from the run",
-    )
     predict_t1 = commands.add_parser(
         "predict-t1",
         help="Predict dev candidate rankings with a saved T1 model bundle",
@@ -240,12 +234,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Existing prepared T1 run directory",
-    )
-    predict_t1.add_argument(
-        "--strict-code",
-        action="store_true",
-        default=False,
-        help="Refuse to predict when the current code commit differs from the run",
     )
     prepare_t1 = commands.add_parser(
         "prepare-t1-run",
