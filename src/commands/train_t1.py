@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
 from sklearn.exceptions import ConvergenceWarning
 
-from benchmark_context import _preflight_benchmark
 from core.data import DataError
-from core.instances import CorpusTagError
 from core.predictions import BenchmarkIntegrityError
 from core.splits import SplitError
 from t1_features.data import load_t1_inputs
@@ -22,38 +19,38 @@ from t1_features.model_io import (
     ModelBundlePublishedCleanupError,
     save_model_bundle,
 )
+from t1_features.run_context import T1RunContextError, load_t1_run_context
 
 
 def _run_train_t1(args: argparse.Namespace) -> int:
-    C = args.C
-    if not math.isfinite(C) or C <= 0:
-        print("error: C must be finite and positive:", file=sys.stderr)
-        print(f"  {C!r}", file=sys.stderr)
+    try:
+        context = load_t1_run_context(
+            args.run_dir,
+            strict_code=args.strict_code,
+        )
+    except T1RunContextError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    output_path = Path(args.output)
+    manifest = context.manifest
+    output_path = context.run_dir / "model.bundle"
     if output_path.is_dir():
-        print("error: output path is a directory:", file=sys.stderr)
+        print("error: model destination is a directory:", file=sys.stderr)
         print(f"  {output_path}", file=sys.stderr)
         return 1
     if output_path.exists() or output_path.is_symlink():
-        print("error: output file already exists:", file=sys.stderr)
+        print("error: model already exists:", file=sys.stderr)
         print(f"  {output_path}", file=sys.stderr)
         return 1
-    if not output_path.parent.is_dir():
-        print("error: output directory does not exist:", file=sys.stderr)
-        print(f"  {output_path.parent}", file=sys.stderr)
-        return 1
-    try:
-        data_dir, tag = _preflight_benchmark(args.data_dir)
-    except (CorpusTagError, DataError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    data_dir = Path(manifest["data"]["root"])
+    tag = manifest["data"]["tag"]
+    split_file = Path(manifest["split"]["path"])
+    C = manifest["parameters"]["C"]
     try:
         inputs = load_t1_inputs(
             data_dir,
             tag,
             split="train",
-            split_file_override=args.split_file,
+            split_file_override=split_file,
         )
     except DataError:
         return 1
@@ -103,6 +100,7 @@ def _run_train_t1(args: argparse.Namespace) -> int:
             print(f"  {note}", file=sys.stderr)
         return 1
     print("T1 training: OK")
+    print(f"Run directory: {context.run_dir}")
     print(f"Data tag: {tag}")
     print(f"Split file: {inputs.benchmark.split_path}")
     print("Split: train")

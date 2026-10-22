@@ -219,28 +219,16 @@ def build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     train_t1.add_argument(
-        "--output",
+        "--run-dir",
         type=Path,
         required=True,
-        help="Path for the saved T1 model bundle",
+        help="Existing prepared T1 run directory",
     )
     train_t1.add_argument(
-        "--C",
-        type=float,
-        default=1.0,
-        help="Logistic regression inverse regularization strength (default: 1.0)",
-    )
-    train_t1.add_argument(
-        "--data-dir",
-        type=Path,
-        default=None,
-        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
-    )
-    train_t1.add_argument(
-        "--split-file",
-        type=Path,
-        default=None,
-        help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
+        "--strict-code",
+        action="store_true",
+        default=False,
+        help="Refuse to train when the current code commit differs from the run",
     )
     predict_t1 = commands.add_parser(
         "predict-t1",

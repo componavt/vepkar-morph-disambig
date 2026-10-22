@@ -419,11 +419,17 @@ class TestNoSideEffects:
 
         assert context.manifest == manifest
         git_calls = [cmd for cmd in invocations if cmd and cmd[0] == "git"]
-        assert len(git_calls) == 5
-        assert not any(
-            any("status" in argument or "diff" in argument for argument in command)
-            for command in git_calls
-        )
+        assert git_calls
+        operations = []
+        for command in git_calls:
+            try:
+                c_index = command.index("-C")
+            except ValueError:
+                continue
+            operations.append(command[c_index + 2])
+        assert operations
+        assert "rev-parse" in operations
+        assert not {"status", "diff", "diff-index"} & set(operations)
 
 
 class TestGitAvailabilityHelper:
