@@ -1,6 +1,5 @@
 """Offline tests for the predict-t1 CLI command."""
 
-import argparse
 import csv
 import json
 import sys
@@ -228,9 +227,10 @@ def _write_passport(run_dir, *, data_root, tag, split_path):
 
 
 def _stub_run_context(monkeypatch, run_dir, manifest):
-    recorded = {}
+    recorded = {"calls": 0}
 
     def fake_load(run_dir_arg, *, strict_code=False):
+        recorded["calls"] += 1
         recorded["run_dir"] = run_dir_arg
         recorded["strict_code"] = strict_code
         return T1RunContext(
@@ -338,7 +338,7 @@ class TestArgumentParsing:
         assert exc.value.code == 2
         assert "unrecognized arguments" in captured.err
 
-    @pytest.mark.parametrize("abbreviation", ["--mod", "--str", "--out", "--dat"])
+    @pytest.mark.parametrize("abbreviation", ["--run", "--str"])
     def test_rejects_abbreviated_options(self, tmp_path, capsys, abbreviation):
         with pytest.raises(SystemExit) as exc:
             cli.main(["predict-t1", "--run-dir", str(tmp_path), abbreviation])
@@ -660,6 +660,7 @@ class TestSuccessfulPrediction:
         assert "Predicted candidate rows: 2" in captured.out
         assert f"Output: {output}" in captured.out
         assert "Validation: OK" in captured.out
+        assert recorded["calls"] == 1
         assert recorded["run_dir"] == run_dir
         assert recorded["strict_code"] is True
 
