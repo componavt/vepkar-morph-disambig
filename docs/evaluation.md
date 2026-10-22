@@ -2,20 +2,23 @@
 
 # Evaluation
 
-This document describes how to create, validate, and evaluate predictions
-for `dev` or `test`, and how to diagnose the frequency baseline on `dev`.
+This document describes how to run the frequency baseline on `dev`
+or `test`, the evaluation metrics, and frequency-baseline diagnostics
+on `dev`. For the T1 workflow, see the
+[README](../README.md#t1-feature-based-model).
 
 ## Before you start
 
 Run the commands from the repository root with the `.venv` environment
-activated. The source data must be downloaded and the split file must
-be created; see the [README](../README.md).
+activated. Obtain the source data by following the
+[instructions in the README](../README.md#work-with-data).
 
-The current dataset uses `data/derived/splits_v2026.09.csv`.
-For a description of the split, see
-[data/derived/README.md](../data/derived/README.md).
+For evaluation, use the published split
+`data/derived/splits_v2026.09.csv`.
+Its structure and generation are described in the
+[split section](../data/derived/README.md#traindevtest-split).
 
-## Complete workflow
+## Frequency baseline workflow
 
 Example for the `test` split:
 
@@ -49,8 +52,9 @@ Files in `/tmp/` are intended for temporary storage.
 `validate-predictions` checks prediction completeness and validity.
 `evaluate-predictions` performs the same check before computing metrics.
 
-Validation and evaluation do not modify the predictions file and do not
-save new results.
+`validate-predictions` and `evaluate-predictions` do not modify
+the predictions file or save new results.
+The T1 command `evaluate-t1-run` saves metrics to `metrics.json`.
 
 [CSV format and prediction requirements](../results/milestones/prediction-format.md).
 
@@ -60,8 +64,9 @@ Every evaluated word occurrence has the same weight. The correct
 candidate is identified by the exact `(wordform_id, gramset)` pair
 selected by the expert.
 
-The evaluation ranks existing candidates. The correct candidate is the
-one selected by the expert; no new candidates are created.
+The metrics evaluate the ranking of existing candidates.
+The correct candidate is the one selected by the expert;
+no new candidates are created.
 
 - `Top-1 accuracy` — the proportion of word occurrences for which the
   correct candidate is ranked first.
