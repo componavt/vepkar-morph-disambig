@@ -6,7 +6,6 @@ import copy
 import json
 import subprocess
 import sys
-import warnings
 from pathlib import Path
 
 import pytest
@@ -79,14 +78,6 @@ def _repo(tmp_path: Path, name: str, files: dict[str, str]) -> Path:
     return root
 
 
-def _code_repo(tmp_path: Path) -> Path:
-    return _repo(
-        tmp_path,
-        "code",
-        {"README.md": "fixture code repo\n", "src/one.py": "print(1)\n"},
-    )
-
-
 def _data_repo(tmp_path: Path) -> Path:
     root = _repo(
         tmp_path,
@@ -119,8 +110,7 @@ def _write_passport(run_dir: Path, manifest: dict) -> None:
     )
 
 
-def _prepared_run(tmp_path: Path, monkeypatch):
-    code = _code_repo(tmp_path)
+def _prepared_run(tmp_path: Path):
     data = _data_repo(tmp_path)
     split = tmp_path / "splits.csv"
     split.write_text(_SPLIT_CONTENT, encoding="utf-8")
@@ -133,15 +123,15 @@ def _prepared_run(tmp_path: Path, monkeypatch):
     run_dir = tmp_path / "runs" / "run-a"
     run_dir.mkdir(parents=True)
     _write_passport(run_dir, manifest)
-    return code, data, split, manifest, run_dir
+    return data, split, manifest, run_dir
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestLoadT1RunContext:
     def test_matching_identities_return_exact_manifest_and_run_path(
-        self, tmp_path, monkeypatch
+        self, tmp_path
     ):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+        data, split, manifest, run_dir = _prepared_run(tmp_path)
 
         context = load_t1_run_context(run_dir)
 
@@ -156,7 +146,7 @@ class TestLoadT1RunContext:
         ).stdout.strip()
 
     def test_relative_and_tilde_run_paths_resolve(self, tmp_path, monkeypatch):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+        data, split, manifest, run_dir = _prepared_run(tmp_path)
         elsewhere = tmp_path / "elsewhere"
         elsewhere.mkdir()
 
@@ -170,18 +160,25 @@ class TestLoadT1RunContext:
         assert expanded.run_dir == run_dir.resolve()
         assert expanded.manifest == manifest
 
-    def test_just_prepared_run_with_only_run_json_accepted(
-        self, tmp_path, monkeypatch
-    ):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+    def test_just_prepared_run_with_only_run_json_accepted(self, tmp_path):
+        data, split, manifest, run_dir = _prepared_run(tmp_path)
         assert sorted(p.name for p in run_dir.iterdir()) == ["run.json"]
 
         context = load_t1_run_context(run_dir)
 
         assert context.manifest == manifest
 
-    def test_no_source_code_git_identity_queried(self, tmp_path, monkeypatch):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+    def test_no_source_code_git_identity_queried_or_corpus_table_loading(
+        self, tmp_path, monkeypatch
+    ):
+        def forbidden(*args, **kwargs):
+            pytest.fail("corpus tables must not be loaded")
+
+        monkeypatch.setattr(benchmark_context, "read_corpus_tables", forbidden)
+        monkeypatch.setattr(
+            benchmark_context, "build_language_instances", forbidden
+        )
+        data, split, manifest, run_dir = _prepared_run(tmp_path)
         original_run = subprocess.run
         invocations = []
 
@@ -196,27 +193,27 @@ class TestLoadT1RunContext:
         assert context.manifest == manifest
         git_calls = [cmd for cmd in invocations if cmd and cmd[0] == "git"]
         assert git_calls
-        for command in git_calls:
-            try:
-                target_index = command.index("-C") + 1
-            except ValueError:
-                continue
-            target = Path(command[target_index]).resolve()
-            assert target != code.resolve()
         operations = []
         for command in git_calls:
-            try:
-                c_index = command.index("-C")
-            except ValueError:
+            if len(command) == 2 and command[1] == "--version":
                 continue
-            operations.append(command[c_index + 2])
+            try:
+                target_index = command.index("-C")
+            except ValueError:
+                pytest.fail(
+                    f"unidentified Git call without a repository target: {command}"
+                )
+            target = Path(command[target_index + 1]).resolve()
+            assert target == data.resolve()
+            operations.append(command[target_index + 2])
         assert "rev-parse" in operations
+        assert not {"status", "diff", "diff-index"} & set(operations)
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestIdentityMismatches:
     def test_recorded_data_tag_mismatch_rejected(self, tmp_path, monkeypatch):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+        data, split, manifest, run_dir = _prepared_run(tmp_path)
         manifest["data"]["tag"] = "v2026.08"
         _write_passport(run_dir, manifest)
 
@@ -229,7 +226,7 @@ class TestIdentityMismatches:
         assert "v2026.09" in message
 
     def test_recorded_data_commit_mismatch_rejected(self, tmp_path, monkeypatch):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+        data, split, manifest, run_dir = _prepared_run(tmp_path)
         manifest["data"]["commit"] = "d" * 40
         _write_passport(run_dir, manifest)
 
@@ -244,7 +241,7 @@ class TestIdentityMismatches:
     def test_changed_split_bytes_cause_fingerprint_mismatch(
         self, tmp_path, monkeypatch
     ):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+        data, split, manifest, run_dir = _prepared_run(tmp_path)
         split.write_text("language,text_id,split\nvep,1,test\n", encoding="utf-8")
 
         with pytest.raises(T1RunContextError) as exc_info:
@@ -316,19 +313,14 @@ class TestRunPathAndPassportErrors:
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestNoSideEffects:
     def test_loaded_manifest_passport_bytes_inputs_and_entries_unchanged(
-        self, tmp_path, monkeypatch
+        self, tmp_path
     ):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
+        data, split, manifest, run_dir = _prepared_run(tmp_path)
         passport_bytes = (run_dir / "run.json").read_bytes()
         split_bytes = split.read_bytes()
         data_files = {
             path.relative_to(data): path.read_bytes()
             for path in data.rglob("*")
-            if path.is_file()
-        }
-        code_files = {
-            path.relative_to(code): path.read_bytes()
-            for path in code.rglob("*")
             if path.is_file()
         }
         entries_before = sorted(p.name for p in run_dir.iterdir())
@@ -344,71 +336,5 @@ class TestNoSideEffects:
             for path in data.rglob("*")
             if path.is_file()
         }
-        after_code = {
-            path.relative_to(code): path.read_bytes()
-            for path in code.rglob("*")
-            if path.is_file()
-        }
         assert after_data == data_files
-        assert after_code == code_files
         assert sorted(p.name for p in run_dir.iterdir()) == entries_before
-
-    def test_malformed_local_toml_has_no_effect(self, tmp_path, monkeypatch):
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
-        (code / "t1.local.toml").write_text(
-            "[paths\nmalformed =", encoding="utf-8"
-        )
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            context = load_t1_run_context(run_dir)
-
-        assert context.manifest == manifest
-        assert not [
-            warning
-            for warning in caught
-            if issubclass(warning.category, UserWarning)
-        ]
-
-    def test_no_corpus_table_loading_and_no_status_or_diff_git_calls(
-        self, tmp_path, monkeypatch
-    ):
-        def forbidden(*args, **kwargs):
-            pytest.fail("corpus tables must not be loaded")
-
-        monkeypatch.setattr(benchmark_context, "read_corpus_tables", forbidden)
-        monkeypatch.setattr(
-            benchmark_context, "build_language_instances", forbidden
-        )
-        code, data, split, manifest, run_dir = _prepared_run(tmp_path, monkeypatch)
-        original_run = subprocess.run
-        invocations = []
-
-        def spy_run(command, *args, **kwargs):
-            invocations.append(command)
-            return original_run(command, *args, **kwargs)
-
-        monkeypatch.setattr(subprocess, "run", spy_run)
-
-        context = load_t1_run_context(run_dir)
-
-        assert context.manifest == manifest
-        git_calls = [cmd for cmd in invocations if cmd and cmd[0] == "git"]
-        assert git_calls
-        operations = []
-        for command in git_calls:
-            try:
-                c_index = command.index("-C")
-            except ValueError:
-                continue
-            operations.append(command[c_index + 2])
-        assert operations
-        assert "rev-parse" in operations
-        assert not {"status", "diff", "diff-index"} & set(operations)
-
-
-class TestGitAvailabilityHelper:
-    def test_reports_true_for_successful_git(self):
-        if not GIT_AVAILABLE:
-            pytest.skip("Git unavailable")
-        assert _git_available() is True

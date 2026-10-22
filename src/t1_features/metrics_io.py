@@ -77,35 +77,29 @@ def build_t1_metrics(
     ``<context.run_dir>/dev.csv``, in binary chunks, to fingerprint its raw
     uncompressed bytes.
     """
-    try:
-        manifest = context.manifest
-        payload = {
-            "format": _FORMAT_NAME,
-            "format_version": _FORMAT_VERSION,
-            "method": _METHOD,
-            "parameters": {"C": manifest["parameters"]["C"]},
-            "split": _TARGET_SPLIT,
-            "word_count": metrics.word_count,
-            "candidate_count": candidate_count,
-            "top1_correct": metrics.top1_correct,
-            "top3_correct": metrics.top3_correct,
-            "metrics": {
-                "top1_accuracy": metrics.top1_accuracy,
-                "mrr": metrics.mrr,
-                "top3_accuracy": metrics.top3_accuracy,
-            },
-            "data": {
-                "tag": manifest["data"]["tag"],
-                "commit": manifest["data"]["commit"],
-                "split_sha256": manifest["split"]["sha256"],
-            },
-            "predictions_sha256": "0" * 64,
-        }
-    except (KeyError, TypeError, AttributeError) as exc:
-        raise T1MetricsError(
-            f"cannot build T1 metrics: incomplete run context: {exc}"
-        ) from exc
-    payload["predictions_sha256"] = _dev_predictions_sha256(context.run_dir)
+    manifest = context.manifest
+    payload = {
+        "format": _FORMAT_NAME,
+        "format_version": _FORMAT_VERSION,
+        "method": _METHOD,
+        "parameters": {"C": manifest["parameters"]["C"]},
+        "split": _TARGET_SPLIT,
+        "word_count": metrics.word_count,
+        "candidate_count": candidate_count,
+        "top1_correct": metrics.top1_correct,
+        "top3_correct": metrics.top3_correct,
+        "metrics": {
+            "top1_accuracy": metrics.top1_accuracy,
+            "mrr": metrics.mrr,
+            "top3_accuracy": metrics.top3_accuracy,
+        },
+        "data": {
+            "tag": manifest["data"]["tag"],
+            "commit": manifest["data"]["commit"],
+            "split_sha256": manifest["split"]["sha256"],
+        },
+        "predictions_sha256": _dev_predictions_sha256(context.run_dir),
+    }
     return payload
 
 

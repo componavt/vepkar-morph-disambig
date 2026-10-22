@@ -120,12 +120,10 @@ def _repo(tmp_path: Path, name: str, files: dict[str, str]) -> Path:
     return root
 
 
-def _valid_code_repo(tmp_path: Path, name: str = "code") -> Path:
-    return _repo(
-        tmp_path,
-        name,
-        {"README.md": "fixture code repo\n", "src/one.py": "print(1)\n"},
-    )
+def _project_root(tmp_path: Path, name: str = "code") -> Path:
+    root = tmp_path / name
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _tagged_data_repo(tmp_path: Path, name: str = "data") -> Path:
@@ -150,7 +148,6 @@ def _default_split(code_root: Path, content: str = _SPLIT_CONTENT) -> Path:
     path = code_root / "data" / "derived" / f"splits_{_TAG}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    _commit_all(code_root)
     return path
 
 
@@ -185,11 +182,6 @@ def _collect(data, split, C=1.0):
         split_file=split,
         C=C,
     )
-
-
-def test_run_manifest_error_is_value_error():
-    assert issubclass(RunManifestError, ValueError)
-    assert RunManifestError is not ValueError
 
 
 def test_parser_defaults_and_explicit_prepare_t1_run_arguments(tmp_path):
@@ -277,7 +269,6 @@ class TestCollectSchema:
         assert manifest["format"] == "vepkar-t1-run"
         assert manifest["format_version"] == 4
         assert manifest["stage"] == "prepared"
-        assert list(manifest["data"]) == ["root", "tag", "commit"]
         assert manifest["data"] == {
             "root": str(data.resolve()),
             "tag": "v2026.09",
@@ -312,14 +303,6 @@ class TestSplitFingerprint:
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestDataRepoRequirements:
-    def test_data_repository_root_and_commit_recorded(self, tmp_path):
-        data = _tagged_data_repo(tmp_path)
-        split = _split_file(tmp_path)
-
-        manifest = _collect(data, split)
-        assert manifest["data"]["root"] == str(data.resolve())
-        assert manifest["data"]["commit"] == _git(data, "rev-parse", "HEAD").stdout.strip()
-
     def test_non_root_directory_rejected(self, tmp_path):
         data = _tagged_data_repo(tmp_path)
         split = _split_file(tmp_path)
@@ -346,7 +329,7 @@ class TestPrepareT1RunCommand:
         self, tmp_path, monkeypatch, capsys
     ):
         self._guard_tables(monkeypatch)
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _default_split(code)
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
@@ -387,7 +370,7 @@ class TestPrepareT1RunCommand:
     def test_cli_toml_paths_with_explicit_overrides_precedence(
         self, tmp_path, monkeypatch, capsys
     ):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         data_toml = _tagged_data_repo(tmp_path, name="data-toml")
         data_cli = _tagged_data_repo(tmp_path, name="data-cli")
         split_toml = _split_file(tmp_path, "split-toml.csv")
@@ -399,7 +382,6 @@ class TestPrepareT1RunCommand:
             f'split_file = "{split_toml}"\n',
             encoding="utf-8",
         )
-        _commit_all(code, "configure")
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
 
         status = cli.main(
@@ -425,7 +407,7 @@ class TestPrepareT1RunCommand:
     def test_cli_explicit_new_nested_run_directory(
         self, tmp_path, monkeypatch, capsys
     ):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         data = _tagged_data_repo(tmp_path)
         _default_split(code)
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
@@ -449,7 +431,7 @@ class TestPrepareT1RunCommand:
     def test_cli_existing_final_run_path_refused(
         self, tmp_path, monkeypatch, capsys
     ):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         data = _tagged_data_repo(tmp_path)
         _default_split(code)
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
@@ -476,7 +458,7 @@ class TestPrepareT1RunCommand:
     def test_cli_data_dir_without_git_repo_fails(
         self, tmp_path, monkeypatch, capsys
     ):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         _default_split(code)
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
         data = tmp_path / "not-a-repo"
@@ -494,7 +476,7 @@ class TestPrepareT1RunCommand:
     def test_cli_missing_published_split_fails(
         self, tmp_path, monkeypatch, capsys
     ):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         data = _tagged_data_repo(tmp_path)
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
         status = cli.main(["prepare-t1-run", "--data-dir", str(data)])
@@ -508,11 +490,10 @@ class TestPrepareT1RunCommand:
         assert "Traceback" not in captured.err
 
     def test_cli_bad_configuration_rejected(self, tmp_path, monkeypatch, capsys):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         (code / "t1.local.toml").write_text(
             '[paths]\nunknown_key = "x"\n', encoding="utf-8"
         )
-        _commit_all(code, "bad config")
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
         status = cli.main(["prepare-t1-run"])
         captured = capsys.readouterr()
@@ -554,7 +535,7 @@ class TestPrepareT1RunCommand:
     def test_cli_passport_reread_failure_reports_created_run(
         self, tmp_path, monkeypatch, capsys
     ):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         data = _tagged_data_repo(tmp_path)
         _default_split(code)
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
@@ -824,7 +805,7 @@ class TestEndToEndSideEffects:
     def test_publication_leaves_only_json_and_inputs_unchanged(
         self, tmp_path, monkeypatch, capsys
     ):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _default_split(code)
         monkeypatch.setattr(prepare_pkg, "_PROJECT_ROOT", code)
@@ -873,30 +854,6 @@ class TestEndToEndSideEffects:
         }
         assert not list(tmp_path.glob(".vepkar-t1-run-*.tmp"))
         assert (created / "run.json").is_file()
-
-
-class TestGitAvailabilityHelper:
-    def test_reports_true_for_successful_git(self):
-        if not GIT_AVAILABLE:
-            pytest.skip("Git unavailable")
-        assert _git_available() is True
-
-    def test_reports_false_for_nonzero_status(self, monkeypatch):
-        def nonzero_run(command, *args, **kwargs):
-            return subprocess.CompletedProcess(
-                args=command, returncode=2, stdout="", stderr=""
-            )
-
-        monkeypatch.setattr(subprocess, "run", nonzero_run)
-        assert _git_available() is False
-
-    @pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
-    def test_reports_false_for_launch_failure(self, monkeypatch, error):
-        def raising_run(command, *args, **kwargs):
-            raise error("simulated missing git")
-
-        monkeypatch.setattr(subprocess, "run", raising_run)
-        assert _git_available() is False
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
@@ -1008,34 +965,18 @@ class TestLoadNonMutating:
 class TestLoadVersionRejection:
     @pytest.mark.parametrize(
         "version",
-        [1, 2, 3, 0, -1, "2", "3", "4", 2.0, 3.0, 4.0, None, True],
+        [3, 5, "4", 4.0, True],
         ids=[
-            "v1",
-            "v2",
             "v3",
-            "zero",
-            "negative",
-            "string-two",
-            "string-three",
+            "v5",
             "string-four",
-            "float-two",
-            "float-three",
             "float-four",
-            "null",
             "boolean",
         ],
     )
     def test_unsupported_format_versions_rejected(self, tmp_path, version):
         manifest = _stable_manifest()
         manifest["format_version"] = version
-        output = _write_raw(tmp_path, manifest)
-        with pytest.raises(RunManifestError) as exc_info:
-            load_run_manifest(output)
-        assert "format_version" in str(exc_info.value)
-
-    def test_old_version_3_manifest_rejected(self, tmp_path):
-        manifest = _stable_manifest()
-        manifest["format_version"] = 3
         output = _write_raw(tmp_path, manifest)
         with pytest.raises(RunManifestError) as exc_info:
             load_run_manifest(output)

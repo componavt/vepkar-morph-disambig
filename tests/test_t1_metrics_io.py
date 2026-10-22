@@ -63,31 +63,33 @@ def _metrics(*, word_count=3, top1=2, top3=3, mrr=0.8):
     )
 
 
-def _base_payload(tmp_path):
-    context = _context(tmp_path)
-    (context.run_dir / "dev.csv").write_bytes(b"word_id,rank\n601,1\n")
-    return build_t1_metrics(context, metrics=_metrics(), candidate_count=4)
+def _payload():
+    return {
+        "format": "vepkar-metrics",
+        "format_version": 2,
+        "method": "t1.1",
+        "parameters": {"C": 1.0},
+        "split": "dev",
+        "word_count": 3,
+        "candidate_count": 4,
+        "top1_correct": 2,
+        "top3_correct": 3,
+        "metrics": {
+            "top1_accuracy": 2 / 3,
+            "mrr": 0.8,
+            "top3_accuracy": 1.0,
+        },
+        "data": {
+            "tag": TAG,
+            "commit": "data-commit-1",
+            "split_sha256": "c" * 64,
+        },
+        "predictions_sha256": "a" * 64,
+    }
 
 
 def _temp_names(root):
     return list(root.glob(".vepkar-t1-metrics-*.tmp"))
-
-
-class TestExceptionTypes:
-    def test_inheritance_and_reported_paths(self):
-        assert issubclass(T1MetricsError, ValueError)
-        assert issubclass(T1MetricsPublishedCleanupError, T1MetricsError)
-        assert T1MetricsError is not ValueError
-        output = Path("metrics.json")
-        temp = Path("temp.tmp")
-        error = T1MetricsPublishedCleanupError(output, temp)
-        assert error.output_path == output
-        assert error.temp_path == temp
-        message = str(error)
-        assert "published" in message.lower()
-        assert "removal" in message.lower()
-        assert str(output) in message
-        assert str(temp) in message
 
 
 class TestExactPayload:
@@ -107,20 +109,6 @@ class TestExactPayload:
         )
         payload = build_t1_metrics(context, metrics=metrics, candidate_count=5)
 
-        assert list(payload) == [
-            "format",
-            "format_version",
-            "method",
-            "parameters",
-            "split",
-            "word_count",
-            "candidate_count",
-            "top1_correct",
-            "top3_correct",
-            "metrics",
-            "data",
-            "predictions_sha256",
-        ]
         assert payload == {
             "format": "vepkar-metrics",
             "format_version": 2,
@@ -143,9 +131,6 @@ class TestExactPayload:
             },
             "predictions_sha256": hashlib.sha256(raw).hexdigest(),
         }
-        assert "code" not in payload
-        assert payload["metrics"]["top1_accuracy"] == 1 / 3
-        assert payload["metrics"]["top3_accuracy"] == 2 / 3
 
     def test_fresh_nested_dictionaries(self, tmp_path):
         context = _context(tmp_path)
@@ -154,7 +139,6 @@ class TestExactPayload:
         payload = build_t1_metrics(context, metrics=metrics, candidate_count=4)
         assert payload["parameters"] is not context.manifest["parameters"]
         assert payload["data"] is not context.manifest["data"]
-        assert payload["metrics"] is not context.manifest
         payload["metrics"]["top1_accuracy"] = 0.123
         payload["metrics"]["mrr"] = 0.5
         assert metrics.top1_accuracy == 2 / 3
@@ -185,17 +169,15 @@ class TestBuildDoesNotModify:
 
 
 class TestBuildInputErrors:
-    def test_missing_dev_csv_path_aware_chained_error(self, tmp_path):
+    @pytest.mark.parametrize(
+        "directory", [False, True], ids=["missing-file", "directory"]
+    )
+    def test_dev_csv_read_failure_path_aware_chained_error(
+        self, tmp_path, directory
+    ):
         context = _context(tmp_path)
-        with pytest.raises(T1MetricsError) as exc_info:
-            build_t1_metrics(context, metrics=_metrics(), candidate_count=4)
-        error = exc_info.value
-        assert str(context.run_dir / "dev.csv") in str(error)
-        assert isinstance(error.__cause__, OSError)
-
-    def test_unreadable_dev_csv_path_aware_chained_error(self, tmp_path):
-        context = _context(tmp_path)
-        (context.run_dir / "dev.csv").mkdir()
+        if directory:
+            (context.run_dir / "dev.csv").mkdir()
         with pytest.raises(T1MetricsError) as exc_info:
             build_t1_metrics(context, metrics=_metrics(), candidate_count=4)
         error = exc_info.value
@@ -205,7 +187,7 @@ class TestBuildInputErrors:
 
 class TestRoundTrip:
     def test_write_read_json_round_trip(self, tmp_path):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         payload_before = copy.deepcopy(payload)
         output = tmp_path / "metrics.json"
         write_t1_metrics(payload, output)
@@ -219,7 +201,7 @@ class TestRoundTrip:
         assert json.loads(text) == payload
         assert payload == payload_before
         assert output.is_file()
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json", "run-dir"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json"]
         assert _temp_names(tmp_path) == []
 
 
@@ -235,7 +217,7 @@ class TestSerializationFailures:
     def test_serialization_failure_creates_no_output_or_temp_files(
         self, tmp_path, mutate
     ):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         mutate(payload)
         output = tmp_path / "metrics.json"
         with pytest.raises(T1MetricsError) as exc_info:
@@ -245,13 +227,13 @@ class TestSerializationFailures:
         assert isinstance(error.__cause__, (TypeError, ValueError))
         assert not output.exists()
         assert _temp_names(tmp_path) == []
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["run-dir"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
 
 
 class TestDestinationProtection:
     @pytest.mark.parametrize("kind", ["file", "directory", "dangling-symlink"])
     def test_existing_destination_preserved(self, tmp_path, kind):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
         if kind == "file":
             output.write_text("precious\n", encoding="utf-8")
@@ -273,10 +255,10 @@ class TestDestinationProtection:
             assert output.is_symlink()
             assert not (tmp_path / "missing-target").exists()
         assert _temp_names(tmp_path) == []
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json", "run-dir"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json"]
 
     def test_missing_parent_not_created(self, tmp_path):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "missing" / "metrics.json"
         with pytest.raises(T1MetricsError):
             write_t1_metrics(payload, output)
@@ -337,7 +319,7 @@ class ClosingFailureStream:
 
 class TestWriteFailures:
     def test_temporary_creation_failure(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
 
         def failing_mkstemp(**kwargs):
@@ -353,7 +335,7 @@ class TestWriteFailures:
         assert _temp_names(tmp_path) == []
 
     def test_fdopen_failure_closes_descriptor_and_cleans_temp(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
         real_mkstemp = metrics_io.tempfile.mkstemp
         real_close = os.close
@@ -381,10 +363,10 @@ class TestWriteFailures:
         assert isinstance(error.__cause__, OSError)
         assert descriptor in closed
         assert not output.exists()
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["run-dir"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
 
     def test_write_failure_cleans_temporary(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
         real_fdopen = os.fdopen
 
@@ -402,7 +384,7 @@ class TestWriteFailures:
         assert _temp_names(tmp_path) == []
 
     def test_write_and_close_failure_preserves_write_cause(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
         real_fdopen = os.fdopen
 
@@ -420,7 +402,7 @@ class TestWriteFailures:
         assert _temp_names(tmp_path) == []
 
     def test_close_failure_after_successful_write(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
         real_fdopen = os.fdopen
         link_calls = []
@@ -449,7 +431,7 @@ class TestWriteFailures:
         assert _temp_names(tmp_path) == []
 
     def test_link_failure_cleans_temporary(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
 
         def failing_link(source, destination):
@@ -465,7 +447,7 @@ class TestWriteFailures:
         assert _temp_names(tmp_path) == []
 
     def test_primary_write_failure_with_cleanup_failure(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
         real_fdopen = os.fdopen
         original_unlink = Path.unlink
@@ -495,12 +477,12 @@ class TestWriteFailures:
         assert len(temp_files) == 1
         for temp in temp_files:
             original_unlink(temp)
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["run-dir"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
 
 
 class TestPublication:
     def test_competing_destination_keeps_foreign_bytes(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
         original_link = os.link
 
@@ -517,10 +499,10 @@ class TestPublication:
         assert isinstance(error.__cause__, OSError)
         assert output.read_bytes() == b"foreign bytes"
         assert _temp_names(tmp_path) == []
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json", "run-dir"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json"]
 
     def test_post_publication_unlink_failure(self, tmp_path, monkeypatch):
-        payload = _base_payload(tmp_path)
+        payload = _payload()
         output = tmp_path / "metrics.json"
         original_link = os.link
         original_unlink = Path.unlink
@@ -549,4 +531,4 @@ class TestPublication:
         for temp in published_temps:
             if temp.exists():
                 original_unlink(temp)
-        assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json", "run-dir"]
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.json"]

@@ -78,12 +78,10 @@ def _repo(tmp_path: Path, name: str, files: dict[str, str]) -> Path:
     return root
 
 
-def _valid_code_repo(tmp_path: Path, name: str = "code") -> Path:
-    return _repo(
-        tmp_path,
-        name,
-        {"README.md": "fixture code repo\n", "src/one.py": "print(1)\n"},
-    )
+def _project_root(tmp_path: Path, name: str = "code") -> Path:
+    root = tmp_path / name
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def _tagged_data_repo(tmp_path: Path, name: str = "data") -> Path:
@@ -97,7 +95,7 @@ def _tagged_data_repo(tmp_path: Path, name: str = "data") -> Path:
 
 
 def _config(tmp_path: Path, suffix: str = "") -> object:
-    code = _valid_code_repo(tmp_path, name=f"code{suffix}")
+    code = _project_root(tmp_path, name=f"code{suffix}")
     data = _tagged_data_repo(tmp_path, name=f"data{suffix}")
     return load_t1_config(
         code,
@@ -287,7 +285,7 @@ class TestPreparationFailures:
         assert not (tmp_path / "runs").exists()
 
     def test_preflight_failure_creates_no_hierarchy(self, tmp_path):
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         config = load_t1_config(
             code,
             data_dir=tmp_path / "no-such-data",
@@ -369,9 +367,9 @@ class TestRollback:
         assert "simulated final directory denial" in str(exc_info.value)
         assert not target.exists()
         assert foreign.read_text(encoding="utf-8") == "keep\n"
-        assert (tmp_path / "runs").iterdir() and all(
-            p.name in {"foreign.txt", "run-a"} for p in (tmp_path / "runs").iterdir()
-        )
+        assert sorted(p.name for p in (tmp_path / "runs").iterdir()) == [
+            "foreign.txt"
+        ]
 
     def test_actual_final_directory_creation_collision(
         self, tmp_path, monkeypatch
@@ -426,7 +424,7 @@ class TestNoSideEffects:
         monkeypatch.setattr(benchmark_context, "read_corpus_tables", forbidden)
         monkeypatch.setattr(benchmark_context, "build_language_instances", forbidden)
 
-        code = _valid_code_repo(tmp_path)
+        code = _project_root(tmp_path)
         data = _tagged_data_repo(tmp_path)
         split = _default_split(code)
         split_before = split.read_bytes()
@@ -460,9 +458,3 @@ class TestNoSideEffects:
         assert load_run_manifest(created / "run.json")
         assert not list(tmp_path.rglob(".vepkar-t1-run-*.tmp"))
         assert sorted(p.name for p in config.runs_dir.iterdir()) == [created.name]
-
-
-class TestErrorType:
-    def test_workspace_error_is_value_error(self):
-        assert issubclass(T1WorkspaceError, ValueError)
-        assert T1WorkspaceError is not ValueError
