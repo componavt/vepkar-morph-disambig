@@ -22,7 +22,7 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install pandas zstandard scikit-learn scipy joblib pytest
+python -m pip install numpy pandas zstandard scikit-learn scipy joblib pytest
 python -m pytest -q
 ```
 
@@ -35,19 +35,21 @@ python -m pytest -q
 python src/cli.py fetch-data v2026.09
 ```
 
-Проверить корпус, построить набор экземпляров и создать разбиение:
+Проверить корпус:
 
 ```bash
 python src/cli.py inspect-data krl
-python src/cli.py build-instances
-python src/cli.py make-splits
 ```
+
+Для экспериментов с `v2026.09` используйте опубликованный файл
+`data/derived/splits_v2026.09.csv`. Повторно создавать разбиение
+перед запуском модели не нужно.
 
 Языковые коды: `vep` — вепсский язык; `krl`, `olo`, `lud` —
 собственно карельское, ливвиковское и людиковское наречия
 карельского языка соответственно.
 
-Описание получаемого разбиения — в
+Описание набора для оценки и разбиения — в
 [data/derived/README.ru.md](data/derived/README.ru.md).
 
 ## Оценка качества
@@ -62,3 +64,40 @@ python src/cli.py make-splits
 
 [Порядок запуска и вычисления метрик](docs/evaluation.ru.md).
 [Результаты частотного метода](docs/frequency_baseline.ru.md).
+
+## T1: модель на признаках
+
+T1.1 ранжирует кандидатов с помощью логистической регрессии.
+Используются грамматические признаки кандидата, суффиксы слова
+и ближайшие соседние слова. Частоты разборов в признаки не входят.
+Одна общая модель обучается на `train` четырёх языковых разновидностей;
+предсказания и оценка пока выполняются только для `dev`.
+
+Выполняйте команды из корня репозитория с активированным окружением
+`.venv`, после получения исходных данных.
+
+Подготовить новый запуск с `C=1.0`:
+
+```bash
+python src/cli.py prepare-t1-run --C 1.0
+```
+
+Скопируйте путь из строки `Run directory:` в переменную `RUN_DIR`:
+
+```bash
+RUN_DIR="путь из строки Run directory:"
+python src/cli.py train-t1 --run-dir "$RUN_DIR"
+python src/cli.py predict-t1 --run-dir "$RUN_DIR"
+python src/cli.py evaluate-t1-run --run-dir "$RUN_DIR"
+```
+
+В каталоге запуска последовательно появляются `run.json` с условиями
+эксперимента, `model.bundle` с моделью, `dev.csv` с предсказаниями
+и `metrics.json` с метриками. Существующие результаты не перезаписываются.
+
+При стандартных путях настройка не требуется. Другие пути можно задать
+в необязательном `t1.local.toml`; пример — `t1.local.example.toml`.
+После подготовки запуска команды берут условия из `run.json`.
+
+Для другого C подготовьте новый запуск. Подбор C проводится на `dev`;
+набор `test` для выбора настроек не используется.
