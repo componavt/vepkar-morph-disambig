@@ -236,6 +236,7 @@ class TestT1RunPipeline:
                 ("krl", 4, "test"),
             ],
         )
+        split_bytes = split_file.read_bytes()
         tables = _install_tables(monkeypatch)
         table_snapshot = _snapshot_tables(tables)
 
@@ -256,6 +257,7 @@ class TestT1RunPipeline:
         captured = capsys.readouterr()
         assert status == 0, captured.err
         assert sorted(p.name for p in run_dir.iterdir()) == ["run.json"]
+        assert split_file.read_bytes() == split_bytes
         _assert_tables_unchanged(tables, table_snapshot)
 
         manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -275,7 +277,6 @@ class TestT1RunPipeline:
         assert manifest["parameters"] == {"C": 0.1, "target_split": "dev"}
 
         passport_bytes = (run_dir / "run.json").read_bytes()
-        split_bytes = split_file.read_bytes()
 
         status = cli.main(["train-t1", "--run-dir", str(run_dir)])
         captured = capsys.readouterr()
@@ -309,18 +310,17 @@ class TestT1RunPipeline:
         dev_bytes = dev_path.read_bytes()
         header, prediction_rows = _read_dev_csv(dev_path)
         assert header == ["word_id", "wordform_id", "gramset", "rank", "score"]
-        assert {row[0] for row in prediction_rows} == {202, 302}
-        assert {(row[1], row[2]) for row in prediction_rows} == {
-            (2020, "D1"),
-            (2021, "D1+ALT"),
-            (3020, "D2"),
-            (3021, "D2+ALT"),
+        assert len(prediction_rows) == 4
+        assert {(row[0], row[1], row[2]) for row in prediction_rows} == {
+            (202, 2020, "D1"),
+            (202, 2021, "D1+ALT"),
+            (302, 3020, "D2"),
+            (302, 3021, "D2+ALT"),
         }
         for word_id in (202, 302):
             assert sorted(
                 row[3] for row in prediction_rows if row[0] == word_id
             ) == [1, 2]
-        assert all(row[0] not in (102, 402) for row in prediction_rows)
 
         status = cli.main(["evaluate-t1-run", "--run-dir", str(run_dir)])
         captured = capsys.readouterr()
