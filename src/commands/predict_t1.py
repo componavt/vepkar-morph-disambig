@@ -8,10 +8,8 @@ from pathlib import Path
 
 from sklearn.exceptions import NotFittedError
 
-from benchmark_context import _preflight_benchmark
 from commands.prediction_reports import _print_validation_failure
 from core.data import DataError
-from core.instances import CorpusTagError
 from core.predictions import BenchmarkIntegrityError
 from core.splits import SplitError
 from t1_features.data import load_t1_inputs
@@ -24,14 +22,19 @@ from t1_features.prediction_io import (
     write_dev_predictions,
 )
 from t1_features.ranking import rank_candidate_scores
+from t1_features.run_context import T1RunContextError, load_t1_run_context
 
 
 def _run_predict_t1(args: argparse.Namespace) -> int:
-    if args.split != "dev":
-        print("error: predict-t1 supports only the dev split:", file=sys.stderr)
-        print(f"  {args.split!r}", file=sys.stderr)
+    try:
+        context = load_t1_run_context(
+            args.run_dir,
+            strict_code=args.strict_code,
+        )
+    except T1RunContextError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
-    output_path = Path(args.output)
+    output_path = context.run_dir / "dev.csv"
     if output_path.is_dir():
         print("error: output path is a directory:", file=sys.stderr)
         print(f"  {output_path}", file=sys.stderr)
@@ -40,29 +43,24 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
         print("error: output file already exists:", file=sys.stderr)
         print(f"  {output_path}", file=sys.stderr)
         return 1
-    if not output_path.parent.is_dir():
-        print("error: output directory does not exist:", file=sys.stderr)
-        print(f"  {output_path.parent}", file=sys.stderr)
-        return 1
+    model_path = context.run_dir / "model.bundle"
     try:
-        model = load_model_bundle(Path(args.model))
+        model = load_model_bundle(model_path)
     except ModelBundleError as exc:
         print("error: cannot load T1 model bundle:", file=sys.stderr)
         print(f"  {exc}", file=sys.stderr)
         for note in getattr(exc, "__notes__", ()):
             print(f"  {note}", file=sys.stderr)
         return 1
-    try:
-        data_dir, tag = _preflight_benchmark(args.data_dir)
-    except (CorpusTagError, DataError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    data_dir = Path(context.manifest["data"]["root"])
+    tag = context.manifest["data"]["tag"]
+    split_file = Path(context.manifest["split"]["path"])
     try:
         inputs = load_t1_inputs(
             data_dir,
             tag,
             split="dev",
-            split_file_override=args.split_file,
+            split_file_override=split_file,
         )
     except DataError:
         return 1
@@ -130,7 +128,8 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
             _print_validation_failure(exc.validation)
         return 1
     print("T1 prediction: OK")
-    print(f"Model: {Path(args.model)}")
+    print(f"Run directory: {context.run_dir}")
+    print(f"Model: {model_path}")
     print(f"Data tag: {tag}")
     print(f"Split file: {inputs.benchmark.split_path}")
     print("Split: dev")

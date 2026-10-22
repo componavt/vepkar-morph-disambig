@@ -236,34 +236,16 @@ def build_parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     predict_t1.add_argument(
-        "--model",
+        "--run-dir",
         type=Path,
         required=True,
-        help="Path to a trusted local T1 model bundle",
+        help="Existing prepared T1 run directory",
     )
     predict_t1.add_argument(
-        "--split",
-        choices=("dev",),
-        required=True,
-        help="Benchmark split to predict (only dev is supported)",
-    )
-    predict_t1.add_argument(
-        "--output",
-        type=Path,
-        required=True,
-        help="Path for the generated dev predictions CSV",
-    )
-    predict_t1.add_argument(
-        "--data-dir",
-        type=Path,
-        default=None,
-        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
-    )
-    predict_t1.add_argument(
-        "--split-file",
-        type=Path,
-        default=None,
-        help="Override the published splits CSV (default: data/derived/splits_<tag>.csv)",
+        "--strict-code",
+        action="store_true",
+        default=False,
+        help="Refuse to predict when the current code commit differs from the run",
     )
     prepare_t1 = commands.add_parser(
         "prepare-t1-run",
