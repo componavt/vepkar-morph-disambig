@@ -12,6 +12,7 @@ from commands.evaluate_predictions import (
     print_evaluation_report,
 )
 from commands.prediction_reports import _print_validation_failure
+from core.data import DataError
 from core.metrics import MetricsInputError, compute_ranking_metrics
 from core.predictions import (
     BenchmarkIntegrityError,
@@ -52,6 +53,8 @@ def _run_evaluate_t1_run(args: argparse.Namespace) -> int:
     split_file = Path(context.manifest["split"]["path"])
     try:
         benchmark = load_benchmark_context(data_dir, tag, split_file)
+    except DataError:
+        return 1
     except SplitError as exc:
         print("error: cannot load the strict benchmark:", file=sys.stderr)
         print(f"  {exc}", file=sys.stderr)

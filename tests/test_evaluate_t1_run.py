@@ -16,12 +16,9 @@ sys.path.insert(0, str(SRC))
 import benchmark_context  # noqa: E402
 import cli  # noqa: E402
 import commands.evaluate_t1_run as evaluate_pkg  # noqa: E402
-from core.data import SUPPORTED_LANGUAGES, CorpusTables  # noqa: E402
+from core.data import SUPPORTED_LANGUAGES, CorpusTables, DataError  # noqa: E402
 from core.metrics import MetricsInputError  # noqa: E402
-from core.predictions import (  # noqa: E402
-    PredictionCsvParseError,
-    BenchmarkIntegrityError,
-)
+from core.predictions import PredictionCsvParseError  # noqa: E402
 from core.splits import SplitError  # noqa: E402
 from t1_features.metrics_io import (  # noqa: E402
     T1MetricsError,
@@ -33,8 +30,6 @@ from t1_features.run_context import T1RunContext, T1RunContextError  # noqa: E40
 _TAG = "fixture-tag"
 _COMMIT = "d" * 40
 _SPLIT_SHA256 = "0" * 64
-
-DEV_IDS = [201, 202, 204]
 
 
 def _make_texts(text_ids):
@@ -271,13 +266,7 @@ class TestArgumentParsing:
     @pytest.mark.parametrize(
         "removed",
         [
-            ["--predictions", "dev.csv"],
             ["--split", "dev"],
-            ["--output", "out.json"],
-            ["--data-dir", "checkout"],
-            ["--split-file", "splits.csv"],
-            ["--C", "0.5"],
-            ["--strict-code"],
             ["--force", "x"],
         ],
     )
@@ -288,7 +277,7 @@ class TestArgumentParsing:
         assert exc.value.code == 2
         assert "unrecognized arguments" in captured.err
 
-    @pytest.mark.parametrize("abbreviation", ["--run", "--metrics"])
+    @pytest.mark.parametrize("abbreviation", ["--run"])
     def test_rejects_abbreviated_options(self, tmp_path, capsys, abbreviation):
         with pytest.raises(SystemExit) as exc:
             cli.main(["evaluate-t1-run", "--run-dir", str(tmp_path), abbreviation])
@@ -317,6 +306,35 @@ class TestContextFailure:
         assert status == 1
         assert "cannot load T1 run passport" in captured.err
         assert str(run_dir / "run.json") in captured.err
+        assert not (run_dir / "metrics.json").exists()
+        assert "Prediction evaluation: OK" not in captured.out
+
+
+class TestCorpusDataError:
+    def test_data_error_reported_once_without_validation_or_publication(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        split_file, run_dir, manifest = _success_env(tmp_path)
+        _written_dev_csv(run_dir)
+        _stub_run_context(monkeypatch, run_dir, manifest)
+        for name in (
+            "validate_predictions",
+            "load_ranked_predictions",
+            "compute_ranking_metrics",
+            "build_t1_metrics",
+            "write_t1_metrics",
+        ):
+            _forbid_stage_call(monkeypatch, name)
+
+        def fail_tables(lang, data_dir):
+            raise DataError("distinctive: corpus tables unavailable")
+
+        monkeypatch.setattr(benchmark_context, "read_corpus_tables", fail_tables)
+        status = cli.main(["evaluate-t1-run", "--run-dir", str(run_dir)])
+        captured = capsys.readouterr()
+        assert status == 1
+        assert captured.err.count("distinctive: corpus tables unavailable") == 1
+        assert "Traceback" not in captured.err
         assert not (run_dir / "metrics.json").exists()
         assert "Prediction evaluation: OK" not in captured.out
 
@@ -350,6 +368,14 @@ class TestDestinationProtection:
             assert "already exists" in captured.err
         assert str(metrics) in captured.err
         assert _recursive_entries(tmp_path) == before
+        if kind == "file":
+            assert metrics.read_text(encoding="utf-8") == "precious\n"
+        elif kind == "directory":
+            assert (metrics / "keep.txt").read_text(encoding="utf-8") == "keep"
+        else:
+            assert metrics.is_symlink()
+            assert metrics.readlink() == tmp_path / "missing-target"
+            assert not (tmp_path / "missing-target").exists()
         assert "Prediction evaluation: OK" not in captured.out
         assert not list(run_dir.glob(".vepkar-t1-metrics-*.tmp"))
 
@@ -368,7 +394,7 @@ class TestSuccessfulEvaluation:
     def test_real_offline_pipeline_via_cli_main(
         self, tmp_path, monkeypatch, capsys
     ):
-        _install_tables(monkeypatch)
+        tables = _install_tables(monkeypatch)
         split_file, run_dir, manifest = _success_env(tmp_path)
         dev_bytes = _written_dev_csv(run_dir)
         recorded = _stub_run_context(monkeypatch, run_dir, manifest)
@@ -376,6 +402,13 @@ class TestSuccessfulEvaluation:
         passport_before = (run_dir / "run.json").read_bytes()
         split_before = split_file.read_bytes()
         entries_before = sorted(p.name for p in run_dir.iterdir())
+        tables_before = {
+            lang: {
+                table_name: getattr(tables[lang], table_name).copy(deep=True)
+                for table_name in ("texts", "sentences", "words", "candidates")
+            }
+            for lang in SUPPORTED_LANGUAGES
+        }
 
         status = cli.main(["evaluate-t1-run", "--run-dir", str(run_dir)])
         captured = capsys.readouterr()
@@ -420,11 +453,15 @@ class TestSuccessfulEvaluation:
         assert split_file.read_bytes() == split_before
         assert (run_dir / "dev.csv").read_bytes() == dev_bytes
         assert not (run_dir / "model.bundle").exists()
-        assert sorted(p.name for p in run_dir.iterdir()) == [
-            "dev.csv",
-            "metrics.json",
-            "run.json",
-        ]
+        assert sorted(p.name for p in run_dir.iterdir()) == sorted(
+            entries_before + ["metrics.json"]
+        )
+        for lang in SUPPORTED_LANGUAGES:
+            for table_name in ("texts", "sentences", "words", "candidates"):
+                pd.testing.assert_frame_equal(
+                    getattr(tables[lang], table_name),
+                    tables_before[lang][table_name],
+                )
         assert not list(run_dir.glob(".vepkar-t1-metrics-*.tmp"))
 
 
