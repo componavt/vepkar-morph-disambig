@@ -118,6 +118,16 @@ def test_wrong_header_rejected(tmp_path, header):
     assert result.predicted_word_count == 0
 
 
+def test_empty_file_is_invalid_with_header_error(tmp_path):
+    path = tmp_path / "predictions.csv"
+    path.write_text("", encoding="utf-8")
+    result = validate_predictions(path, "train", TRAIN_INSTANCES, SPLIT_ROWS)
+    assert not result.is_valid
+    assert "header" in result.errors
+    assert result.error_counts["header"] == 1
+    assert result.predicted_word_count == 0
+
+
 def test_missing_expected_candidate(tmp_path):
     path = tmp_path / "predictions.csv"
     rows = [row for row in VALID_ROWS if not (row[0] == 501 and row[3] == 2)]

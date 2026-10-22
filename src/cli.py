@@ -21,6 +21,7 @@ from commands.evaluate_predictions import (
     load_ranked_predictions,
     print_evaluation_report,
 )
+from commands.evaluate_t1_run import _run_evaluate_t1_run
 from commands.fetch_data import _run_fetch_data
 from commands.frequency_baseline import _run_frequency_baseline
 from commands.inspect_data import (
@@ -235,6 +236,17 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Existing prepared T1 run directory",
     )
+    evaluate_t1_run = commands.add_parser(
+        "evaluate-t1-run",
+        help="Evaluate the saved dev predictions of a T1 run and publish metrics",
+        allow_abbrev=False,
+    )
+    evaluate_t1_run.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Existing prepared T1 run directory",
+    )
     prepare_t1 = commands.add_parser(
         "prepare-t1-run",
         help="Record provenance and intended settings of a T1 dev experiment",
@@ -293,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_train_t1(args)
     if args.command == "predict-t1":
         return _run_predict_t1(args)
+    if args.command == "evaluate-t1-run":
+        return _run_evaluate_t1_run(args)
     if args.command == "prepare-t1-run":
         return _run_prepare_t1_run(args)
     parser.print_help()

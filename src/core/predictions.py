@@ -148,7 +148,7 @@ def validate_predictions(
         with open(predictions_path, encoding="utf-8", newline="") as fh:
             reader = csv.reader(fh, strict=True)
             header = next(reader, None)
-            if tuple(header) != PREDICTION_HEADER:
+            if tuple(header or ()) != PREDICTION_HEADER:
                 _record_error(
                     errors,
                     error_counts,
