@@ -22,6 +22,7 @@ from commands.evaluate_predictions import (
     print_evaluation_report,
 )
 from commands.evaluate_t1_run import _run_evaluate_t1_run
+from commands.export_t1_milestone import _run_export_t1_milestone
 from commands.fetch_data import _run_fetch_data
 from commands.frequency_baseline import _run_frequency_baseline
 from commands.inspect_data import (
@@ -279,6 +280,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the published splits CSV (default: published split for the data tag)",
     )
+    export_t1_milestone = commands.add_parser(
+        "export-t1-milestone",
+        help="Export one completed T1.1 dev result into a compact milestone directory",
+        allow_abbrev=False,
+    )
+    export_t1_milestone.add_argument(
+        "--run-dir",
+        type=Path,
+        required=True,
+        help="Existing finished T1 run directory",
+    )
     return parser
 
 
@@ -309,6 +321,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_evaluate_t1_run(args)
     if args.command == "prepare-t1-run":
         return _run_prepare_t1_run(args)
+    if args.command == "export-t1-milestone":
+        return _run_export_t1_milestone(args)
     parser.print_help()
     return 0
 
