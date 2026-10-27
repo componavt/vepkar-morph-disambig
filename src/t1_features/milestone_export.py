@@ -164,7 +164,7 @@ def _extract_fields(metrics, path: Path) -> dict:
 def _render_readme(fields: dict) -> str:
     return _README_TEMPLATE.format(
         tag=fields["tag"],
-        C=f"{fields['C']:.4f}",
+        C=str(fields["C"]),
         word_count=fields["word_count"],
         candidate_count=fields["candidate_count"],
         top1_accuracy=f"{fields['top1_accuracy']:.4f}",
@@ -341,12 +341,19 @@ def export_t1_milestone(
             source = staging / name
             target = destination / name
             try:
-                os.rename(source, target)
+                os.link(source, target)
             except OSError as exc:
                 raise T1MilestoneExportError(
                     f"cannot publish milestone file {target}: {exc}"
                 ) from exc
             moved.append(name)
+            try:
+                source.unlink()
+            except OSError as exc:
+                raise T1MilestoneExportError(
+                    f"cannot remove staged milestone file {source} after "
+                    f"publishing {target}: {exc}"
+                ) from exc
     except BaseException as exc:
         for note in _cleanup_notes(
             destination, staging, created_destination, moved

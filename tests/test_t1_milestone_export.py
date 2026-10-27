@@ -70,7 +70,7 @@ def _export(tmp_path, run_dir, tag=TAG):
 
 
 def _staging_leftovers(root):
-    return list(root.glob(".vepkar-t1-milestone-*.tmp"))
+    return list(root.rglob(".vepkar-t1-milestone-*.tmp"))
 
 
 class TestExactDestinationAndFiles:
@@ -152,14 +152,14 @@ class TestReadme:
     def test_readme_contains_factual_fields_and_qualified_statement(
         self, tmp_path
     ):
-        run_dir = _make_run(tmp_path)
+        run_dir = _make_run(tmp_path, metrics=_metrics_bytes(C=0.00001))
         destination = _export(tmp_path, run_dir)
         readme = (destination / "README.md").read_text(encoding="utf-8")
         assert "# T1.1: feature-based candidate ranking" in readme
         assert "Binary logistic regression with morphological, suffix, and" in readme
         assert "immediate-context features, without train-frequency features" in readme
         assert f"Data tag: {TAG}" in readme
-        assert "C: 2.5000" in readme
+        assert "C: 1e-05" in readme
         assert "Evaluation split: dev" in readme
         assert (
             "This is a development-set result, not a final test evaluation."
@@ -361,6 +361,35 @@ class TestControlledFailures:
         with pytest.raises(T1MilestoneExportError):
             export_t1_milestone(run_dir, milestones_dir=milestones)
         assert destination.read_bytes() == foreign
+        assert _staging_leftovers(milestones) == []
+        assert sorted(p.name for p in run_dir.iterdir()) == [
+            "dev.csv",
+            "metrics.json",
+        ]
+        assert (run_dir / "dev.csv").read_bytes() == b"a,b\n1,2\n"
+
+    def test_publication_file_collision_preserves_competing_bytes(
+        self, tmp_path, monkeypatch
+    ):
+        run_dir = _make_run(tmp_path)
+        milestones = tmp_path / "milestones"
+        destination = milestones / TAG / run_dir.name
+        foreign = b"foreign competing target bytes\n"
+        real_link = os.link
+        injected = False
+
+        def competing_link(source, target, *args, **kwargs):
+            nonlocal injected
+            if not injected and Path(target) == destination / "README.md":
+                injected = True
+                with open(target, "wb") as fh:
+                    fh.write(foreign)
+            return real_link(source, target, *args, **kwargs)
+
+        monkeypatch.setattr(milestone_export.os, "link", competing_link)
+        with pytest.raises(T1MilestoneExportError):
+            export_t1_milestone(run_dir, milestones_dir=milestones)
+        assert (destination / "README.md").read_bytes() == foreign
         assert _staging_leftovers(milestones) == []
         assert sorted(p.name for p in run_dir.iterdir()) == [
             "dev.csv",
