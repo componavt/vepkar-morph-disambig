@@ -1,0 +1,24 @@
+{
+  "format": "vepkar-metrics",
+  "format_version": 2,
+  "method": "t1.1",
+  "parameters": {
+    "C": 10.0
+  },
+  "split": "dev",
+  "word_count": 2826,
+  "candidate_count": 6961,
+  "top1_correct": 2377,
+  "top3_correct": 2820,
+  "metrics": {
+    "top1_accuracy": 0.8411181882519462,
+    "mrr": 0.9180378627034678,
+    "top3_accuracy": 0.9978768577494692
+  },
+  "data": {
+    "tag": "v2026.09",
+    "commit": "351f179508b8568afee496e379c1731e1a5dd8df",
+    "split_sha256": "8df8bb0533187be991fafeb0adb97c60ac9ef069138f5cdfae8499b7ce9f9e45"
+  },
+  "predictions_sha256": "0cd2473df26f696a053d2699340d8def8e71569c539af0b25ab5f2c5ece8e7a8"
+}
