@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -115,22 +115,39 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _freeze_local_date(monkeypatch, year: int, month: int, day: int) -> None:
+    frozen = date(year, month, day)
+
+    class _FrozenClock:
+        @staticmethod
+        def today():
+            return frozen
+
+    monkeypatch.setattr(workspace, "date", _FrozenClock)
+
+
+def _t1_1_names(label: str, year: int, month: int, day: int) -> list[str]:
+    stamp = f"{year:04d}-{month:02d}-{day:02d}"
+    base = f"t1.1-C{label}-{stamp}"
+    return [base] + [f"{base}{letter}" for letter in "bcdefghijklmnopqrstuvwxyz"]
+
+
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
 class TestAutomaticCreation:
     @pytest.mark.parametrize(
         ("C", "label"),
-        [(1.0, "t1-C1-"), (0.1, "t1-C0.1-"), (2.5, "t1-C2.5-")],
+        [(1.0, "1"), (0.1, "0.1"), (2.5, "2.5")],
     )
-    def test_creates_run_with_readable_label_and_valid_passport(
-        self, tmp_path, C, label
+    def test_creates_run_with_exact_automatic_name_and_valid_passport(
+        self, tmp_path, monkeypatch, C, label
     ):
+        _freeze_local_date(monkeypatch, 2026, 10, 29)
         config = _config(tmp_path)
         _default_split(config.repo_root)
         created = create_t1_run(config, C=C)
         assert created.is_absolute()
         assert created.parent == config.runs_dir
-        assert created.name.startswith(label)
-        assert re.fullmatch(r"[A-Za-z0-9_]+", created.name[len(label) :])
+        assert created.name == f"t1.1-C{label}-2026-10-29"
         assert sorted(p.name for p in created.iterdir()) == ["run.json"]
         manifest = load_run_manifest(created / "run.json")
         assert manifest["format_version"] == 4
@@ -138,15 +155,132 @@ class TestAutomaticCreation:
         assert manifest["parameters"]["C"] == C
         assert manifest["parameters"]["target_split"] == "dev"
 
-    def test_two_automatic_calls_create_distinct_runs(self, tmp_path):
+    def test_repeated_creation_same_C_and_date_appends_b_then_c(
+        self, tmp_path, monkeypatch
+    ):
+        _freeze_local_date(monkeypatch, 2026, 10, 29)
         config = _config(tmp_path)
         _default_split(config.repo_root)
         first = create_t1_run(config)
         first_bytes = (first / "run.json").read_bytes()
         second = create_t1_run(config)
-        assert second != first
+        third = create_t1_run(config)
+        assert [p.name for p in (first, second, third)] == [
+            "t1.1-C1-2026-10-29",
+            "t1.1-C1-2026-10-29b",
+            "t1.1-C1-2026-10-29c",
+        ]
         assert (first / "run.json").read_bytes() == first_bytes
-        assert sorted(config.runs_dir.iterdir()) == sorted([first, second])
+        assert sorted(p.name for p in config.runs_dir.iterdir()) == [
+            "t1.1-C1-2026-10-29",
+            "t1.1-C1-2026-10-29b",
+            "t1.1-C1-2026-10-29c",
+        ]
+
+    def test_different_C_or_date_starts_its_own_suffix_sequence(
+        self, tmp_path, monkeypatch
+    ):
+        _freeze_local_date(monkeypatch, 2026, 10, 29)
+        config = _config(tmp_path)
+        _default_split(config.repo_root)
+        first = create_t1_run(config)
+        create_t1_run(config)
+        other_C = create_t1_run(config, C=0.1)
+        _freeze_local_date(monkeypatch, 2026, 10, 30)
+        next_day = create_t1_run(config)
+        assert first.name == "t1.1-C1-2026-10-29"
+        assert other_C.name == "t1.1-C0.1-2026-10-29"
+        assert next_day.name == "t1.1-C1-2026-10-30"
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["file", "directory", "valid-symlink", "dangling-symlink"],
+    )
+    def test_occupied_unsuffixed_name_preserved_and_next_candidate_used(
+        self, tmp_path, monkeypatch, kind
+    ):
+        _freeze_local_date(monkeypatch, 2026, 10, 29)
+        config = _config(tmp_path)
+        _default_split(config.repo_root)
+        config.runs_dir.mkdir(parents=True)
+        occupied = config.runs_dir / "t1.1-C1-2026-10-29"
+        if kind == "file":
+            occupied.write_text("keep\n", encoding="utf-8")
+        elif kind == "directory":
+            occupied.mkdir()
+            (occupied / "marker.txt").write_text("keep\n", encoding="utf-8")
+        elif kind == "valid-symlink":
+            link_target = config.runs_dir / "linked-target"
+            link_target.mkdir()
+            occupied.symlink_to(link_target)
+        else:
+            occupied.symlink_to(config.runs_dir / "missing-target")
+        created = create_t1_run(config)
+        assert created.name == "t1.1-C1-2026-10-29b"
+        if kind == "file":
+            assert occupied.read_text(encoding="utf-8") == "keep\n"
+        elif kind == "directory":
+            assert (occupied / "marker.txt").read_text(encoding="utf-8") == "keep\n"
+        elif kind == "valid-symlink":
+            assert occupied.is_symlink()
+            assert (config.runs_dir / "linked-target").is_dir()
+        else:
+            assert occupied.is_symlink()
+            assert not (config.runs_dir / "missing-target").exists()
+        assert not (occupied / "run.json").exists()
+        assert sorted(p.name for p in created.iterdir()) == ["run.json"]
+
+    def test_actual_mkdir_collision_keeps_competing_directory_and_moves_on(
+        self, tmp_path, monkeypatch
+    ):
+        _freeze_local_date(monkeypatch, 2026, 10, 29)
+        config = _config(tmp_path)
+        _default_split(config.repo_root)
+        config.runs_dir.mkdir(parents=True)
+        first_candidate = config.runs_dir / "t1.1-C1-2026-10-29"
+        marker = b"competing directory marker bytes\n"
+        original_mkdir = Path.mkdir
+        staged = False
+
+        def colliding_mkdir(self, *args, **kwargs):
+            nonlocal staged
+            if "parents" not in kwargs and "exist_ok" not in kwargs and not staged:
+                staged = True
+                original_mkdir(self, *args, **kwargs)
+                (self / "marker.bin").write_bytes(marker)
+                return original_mkdir(self, *args, **kwargs)
+            return original_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", colliding_mkdir)
+        created = create_t1_run(config)
+        assert created.name == "t1.1-C1-2026-10-29b"
+        assert (first_candidate / "marker.bin").read_bytes() == marker
+        assert sorted(p.name for p in first_candidate.iterdir()) == ["marker.bin"]
+        assert not (first_candidate / "run.json").exists()
+        assert sorted(p.name for p in created.iterdir()) == ["run.json"]
+        assert sorted(p.name for p in config.runs_dir.iterdir()) == [
+            "t1.1-C1-2026-10-29",
+            "t1.1-C1-2026-10-29b",
+        ]
+
+    def test_all_candidate_names_occupied_raises_without_fallback(
+        self, tmp_path, monkeypatch
+    ):
+        _freeze_local_date(monkeypatch, 2026, 10, 29)
+        config = _config(tmp_path)
+        _default_split(config.repo_root)
+        config.runs_dir.mkdir(parents=True)
+        names = _t1_1_names("1", 2026, 10, 29)
+        assert len(names) == 26
+        for name in names:
+            (config.runs_dir / name).mkdir()
+        with pytest.raises(T1WorkspaceError) as exc_info:
+            create_t1_run(config)
+        assert "exhausted" in str(exc_info.value)
+        assert sorted(p.name for p in config.runs_dir.iterdir()) == sorted(names)
+        assert not any(
+            (config.runs_dir / name / "run.json").exists() for name in names
+        )
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")

@@ -10,7 +10,7 @@ data checkout.
 from __future__ import annotations
 
 import math
-import tempfile
+from datetime import date
 from pathlib import Path
 
 from benchmark_context import _preflight_benchmark
@@ -91,13 +91,26 @@ def _create_automatic_run_dir(runs_dir: Path, C) -> Path:
         raise T1WorkspaceError(
             f"cannot create runs directory {runs_dir}: {exc}"
         ) from exc
-    try:
-        name = tempfile.mkdtemp(prefix=f"t1-C{_run_label(C)}-", dir=runs_dir)
-    except OSError as exc:
-        raise T1WorkspaceError(
-            f"cannot create a new run directory under {runs_dir}: {exc}"
-        ) from exc
-    return Path(name)
+    today = date.today()
+    label = _run_label(C)
+    base = f"t1.1-C{label}-{today.isoformat()}"
+    for suffix in ("",) + tuple("bcdefghijklmnopqrstuvwxyz"):
+        candidate = runs_dir / f"{base}{suffix}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise T1WorkspaceError(
+                f"cannot create a new run directory {candidate}: {exc}"
+            ) from exc
+        return candidate
+    raise T1WorkspaceError(
+        f"cannot create a new automatic run directory under {runs_dir}: "
+        f"all candidate names for method t1.1, C {label}, and date "
+        f"{today.isoformat()} are exhausted "
+        f"(t1.1-C{label}-{today.isoformat()} plus suffixes b..z)"
+    )
 
 
 def _create_explicit_run_dir(target: Path) -> Path:
@@ -128,11 +141,12 @@ def create_t1_run(
 ) -> Path:
     """Prepare one T1 run directory and publish its passport under it.
 
-    With ``run_dir`` None a unique directory ``t1-C<label>-<suffix>`` is
-    created under ``config.runs_dir``.  With an explicit ``run_dir``, a
-    leading ``~`` is expanded, a relative path is resolved against the
-    caller's current directory, and an already-existing final path is
-    rejected before any other work.
+    With ``run_dir`` None a directory ``t1.1-C<label>-<YYYY-MM-DD>`` is
+    created under ``config.runs_dir``; further runs for the same C and
+    date append a lowercase Latin letter ``b`` through ``z`` directly to
+    the date.  With an explicit ``run_dir``, a leading ``~`` is expanded, a
+    relative path is resolved against the caller's current directory, and
+    an already-existing final path is rejected before any other work.
     """
     _validate_C(C)
     if run_dir is not None:
