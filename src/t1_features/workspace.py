@@ -50,7 +50,10 @@ def _run_label(C) -> str:
     """Readable directory-name label for the regularization strength."""
     if type(C) is int:
         return str(C)
-    return format(C, "g")
+    text = str(C)
+    if text.endswith(".0"):
+        text = text[:-2]
+    return text
 
 
 def _resolve_explicit_run_dir(run_dir: Path) -> Path:

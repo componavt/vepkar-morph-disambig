@@ -136,7 +136,14 @@ def _t1_1_names(label: str, year: int, month: int, day: int) -> list[str]:
 class TestAutomaticCreation:
     @pytest.mark.parametrize(
         ("C", "label"),
-        [(1.0, "1"), (0.1, "0.1"), (2.5, "2.5")],
+        [
+            (1.0, "1"),
+            (0.1, "0.1"),
+            (2.5, "2.5"),
+            (10.0, "10"),
+            (1.0000001, "1.0000001"),
+            (1.0000002, "1.0000002"),
+        ],
     )
     def test_creates_run_with_exact_automatic_name_and_valid_passport(
         self, tmp_path, monkeypatch, C, label
@@ -244,7 +251,12 @@ class TestAutomaticCreation:
 
         def colliding_mkdir(self, *args, **kwargs):
             nonlocal staged
-            if "parents" not in kwargs and "exist_ok" not in kwargs and not staged:
+            if (
+                "parents" not in kwargs
+                and "exist_ok" not in kwargs
+                and not staged
+                and self == first_candidate
+            ):
                 staged = True
                 original_mkdir(self, *args, **kwargs)
                 (self / "marker.bin").write_bytes(marker)
