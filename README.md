@@ -106,3 +106,30 @@ in the output of `prepare-t1-run` and assign it to `RUN_DIR`.
 Then run training, prediction, and evaluation for that run.
 
 Select C on `dev`; do not use `test` to select settings.
+
+### Exporting a result
+
+To export a completed run, execute:
+
+```bash
+python src/cli.py export-t1-milestone --run-dir "$RUN_DIR"
+```
+
+The command creates a separate result package:
+
+```text
+work/runs/<run>/
+        |
+        v
+results/milestones/<tag>/<run>/
+    README.md       — run description and metrics;
+    metrics.json    — a copy of the metrics and experiment settings;
+    dev.csv.zst     — compressed dev predictions.
+```
+
+Here, `<run>` is the run directory name, and `<tag>` is the source-data
+version recorded in `metrics.json`, for example `v2026.09`.
+
+The package path is printed in the `Milestone directory:` line.
+The source run remains unchanged.
+An existing result directory is not overwritten.
