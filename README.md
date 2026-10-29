@@ -107,11 +107,35 @@ Then run training, prediction, and evaluation for that run.
 
 Select C on `dev`; do not use `test` to select settings.
 
-### Exporting a result
+### Running with a single command
 
-To export a completed run, execute:
+From the repository root, run:
 
 ```bash
+bash scripts/t1-run-tools.sh 0.1
+```
+
+The helper creates a new run with the specified C and sequentially performs
+preparation, training, prediction, and evaluation. If no argument is supplied,
+C=1.0 is used.
+
+Activating `.venv` is not required: the helper uses the project's interpreter,
+`.venv/bin/python`. Path settings are read from `t1.local.toml`, if present.
+
+Command output remains in the terminal; no logs are saved.
+The helper stops on error. To continue manually, use the
+[individual commands](#preparing-and-running-an-experiment)
+with the interrupted run's directory.
+
+Result export is performed separately.
+
+### Exporting a result
+
+To export a completed run, copy the desired run's path from the
+`Run directory:` line and assign it to `RUN_DIR`:
+
+```bash
+RUN_DIR="path from the Run directory: line"
 python src/cli.py export-t1-milestone --run-dir "$RUN_DIR"
 ```
 

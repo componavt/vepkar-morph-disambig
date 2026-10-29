@@ -131,9 +131,11 @@ bash scripts/t1-run-tools.sh 0.1
 
 ### Экспорт результата
 
-Для экспорта завершённого запуска выполните:
+Для экспорта завершённого запуска скопируйте путь нужного запуска
+из строки `Run directory:` и присвойте его переменной `RUN_DIR`:
 
 ```bash
+RUN_DIR="путь из строки Run directory:"
 python src/cli.py export-t1-milestone --run-dir "$RUN_DIR"
 ```
 
