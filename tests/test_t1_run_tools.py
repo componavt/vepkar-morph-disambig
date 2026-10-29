@@ -187,6 +187,30 @@ class TestSuccessfulRuns:
         assert "T1 training: OK" in result.stdout
         assert "T1.1 run complete" in result.stdout
 
+    def test_explicit_empty_c_forwarded_and_prepare_failure_preserved(
+        self, fake_project, tmp_path
+    ):
+        run_dir = tmp_path / "runs" / "run-a"
+        _write_plan(
+            fake_project.plan,
+            [
+                {
+                    "command": "prepare-t1-run",
+                    "out": f"T1 run prepared\nRun directory: {run_dir}\n",
+                    "status": 42,
+                },
+            ],
+        )
+        result = _run_script(
+            fake_project.script, fake_project.record, fake_project.plan, ""
+        )
+        assert result.returncode == 42
+        invocations = _invocations(fake_project.record)
+        assert len(invocations) == 1
+        assert invocations[0]["argv"][2] == "prepare-t1-run"
+        assert invocations[0]["argv"][3] == "--C="
+        assert not (fake_project.root / "src" / "cli-ran.marker").exists()
+
 
 class TestStageFailures:
     @pytest.mark.parametrize(

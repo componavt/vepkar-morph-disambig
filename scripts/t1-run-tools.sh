@@ -12,7 +12,7 @@ if (($# > 1)); then
     exit 2
 fi
 
-C="${1:-1.0}"
+C="${1-1.0}"
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)" || exit 1
 PY="$ROOT/.venv/bin/python"
