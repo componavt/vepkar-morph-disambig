@@ -689,6 +689,76 @@ class TestLifecycleAndBenchmark:
         assert str(run_b / "dev.csv") in str(excinfo.value)
         assert isinstance(excinfo.value.__cause__, OSError)
 
+    def test_cleanup_failure_preserves_primary_validation_error(
+        self, tmp_path, monkeypatch
+    ):
+        _install_tables(monkeypatch)
+        repo_root, _ = _setup_repo(tmp_path)
+        _stub_preflight(monkeypatch, repo_root / "data" / "dictorpus-data")
+
+        def forbidden_compare(*args, **kwargs):
+            pytest.fail("comparison core must not be called on invalid input")
+
+        monkeypatch.setattr(comparison_inputs, "compare_rankings", forbidden_compare)
+
+        run_a = _make_package(
+            tmp_path / "runs" / "run-a", _INCOMPLETE_BYTES, compressed=True
+        )
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
+
+        real_validate_and_load = comparison_inputs._validate_and_load
+        captured = {}
+
+        def spy_validate_and_load(readable_path, source, benchmark):
+            try:
+                return real_validate_and_load(readable_path, source, benchmark)
+            except T1ComparisonInputError as exc:
+                captured["error"] = exc
+                captured["validation"] = exc.validation
+                captured["cause"] = exc.__cause__
+                raise
+
+        monkeypatch.setattr(
+            comparison_inputs, "_validate_and_load", spy_validate_and_load
+        )
+
+        owned = tmp_path / "owned"
+        owned.mkdir()
+        real = comparison_inputs.tempfile.TemporaryDirectory
+        tracked = {}
+
+        def wrapped(*args, **kwargs):
+            kwargs = dict(kwargs)
+            kwargs["dir"] = str(owned)
+            td = real(*args, **kwargs)
+            tracked["path"] = Path(td.name)
+
+            class FailingTemporaryDirectory:
+                def __enter__(self):
+                    return td.name
+
+                def __exit__(self, etype, value, tb):
+                    td.cleanup()
+                    raise OSError("temporary cleanup denied")
+
+            return FailingTemporaryDirectory()
+
+        monkeypatch.setattr(comparison_inputs.tempfile, "TemporaryDirectory", wrapped)
+
+        with pytest.raises(T1ComparisonInputError) as excinfo:
+            load_t1_comparison(run_a, run_b, repo_root=repo_root)
+
+        err = excinfo.value
+        assert err is captured["error"]
+        assert err.validation is captured["validation"]
+        assert err.validation is not None
+        assert err.validation.is_valid is False
+        assert "invalid T1 predictions" in str(err)
+        assert str(run_a / "dev.csv.zst") in str(err)
+        assert err.__cause__ is captured["cause"]
+        assert any("temporary cleanup denied" in note for note in err.__notes__)
+        assert not tracked["path"].exists()
+
     def test_benchmark_split_undecodable(self, tmp_path, monkeypatch):
         _install_tables(monkeypatch)
         repo_root, split_path = _setup_repo(tmp_path)

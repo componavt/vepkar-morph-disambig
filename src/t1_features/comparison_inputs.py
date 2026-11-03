@@ -305,38 +305,49 @@ def load_t1_comparison(
             f"{split_detail}: {exc}"
         ) from exc
 
+    application_error: T1ComparisonInputError | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="vepkar-t1-compare-") as temp:
             temp_dir = Path(temp)
-            readable_1 = _prepare_readable(source_1.predictions_path, temp_dir, 1)
-            readable_2 = _prepare_readable(source_2.predictions_path, temp_dir, 2)
-            rows_1 = _validate_and_load(readable_1, source_1, benchmark)
-            rows_2 = _validate_and_load(readable_2, source_2, benchmark)
-
-            dev_texts = {
-                (language, text_id)
-                for language, text_id, split in benchmark.split_rows
-                if split == _TARGET_SPLIT
-            }
-            dev_instances = [
-                instance
-                for instance in benchmark.instances
-                if (instance.language, instance.text_id) in dev_texts
-            ]
-
             try:
-                comparison = compare_rankings(dev_instances, rows_1, rows_2)
-            except MetricsInputError as exc:
-                raise T1ComparisonInputError(
-                    f"comparison of T1 predictions {source_1.predictions_path} and "
-                    f"{source_2.predictions_path} failed: {exc}"
-                ) from exc
-            result = T1LoadedComparison(
-                source_1=source_1,
-                source_2=source_2,
-                comparison=comparison,
-            )
+                readable_1 = _prepare_readable(source_1.predictions_path, temp_dir, 1)
+                readable_2 = _prepare_readable(source_2.predictions_path, temp_dir, 2)
+                rows_1 = _validate_and_load(readable_1, source_1, benchmark)
+                rows_2 = _validate_and_load(readable_2, source_2, benchmark)
+
+                dev_texts = {
+                    (language, text_id)
+                    for language, text_id, split in benchmark.split_rows
+                    if split == _TARGET_SPLIT
+                }
+                dev_instances = [
+                    instance
+                    for instance in benchmark.instances
+                    if (instance.language, instance.text_id) in dev_texts
+                ]
+
+                try:
+                    comparison = compare_rankings(dev_instances, rows_1, rows_2)
+                except MetricsInputError as exc:
+                    raise T1ComparisonInputError(
+                        f"comparison of T1 predictions {source_1.predictions_path} and "
+                        f"{source_2.predictions_path} failed: {exc}"
+                    ) from exc
+                result = T1LoadedComparison(
+                    source_1=source_1,
+                    source_2=source_2,
+                    comparison=comparison,
+                )
+            except T1ComparisonInputError as exc:
+                application_error = exc
+                raise
     except OSError as exc:
+        if application_error is not None:
+            application_error.add_note(
+                f"temporary workspace cleanup failed for "
+                f"{source_1.predictions_path} and {source_2.predictions_path}: {exc}"
+            )
+            raise application_error
         raise T1ComparisonInputError(
             f"T1 comparison temporary workspace failed for "
             f"{source_1.predictions_path} and {source_2.predictions_path}: {exc}"
