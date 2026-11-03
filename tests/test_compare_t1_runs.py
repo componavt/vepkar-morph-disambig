@@ -767,7 +767,7 @@ class TestCliFailures:
         run_a, run_b = _cli_packages(tmp_path)
 
         def file_exists_link(src, dst):
-            raise FileExistsError("destination already exists during link")
+            raise FileExistsError("simulated publication collision")
 
         monkeypatch.setattr(
             "t1_features.comparison_output.os.link", file_exists_link
