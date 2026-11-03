@@ -155,6 +155,25 @@ def test_mixed_comparison_covers_all_outcomes():
     mean_delta_rr = sum(r.delta_rr for r in result.rows) / len(result.rows)
     assert result.overall.delta_mrr == pytest.approx(mean_delta_rr)
 
+    summary = result.overall
+    assert (
+        summary.both_correct
+        + summary.corrected
+        + summary.regressed
+        + summary.both_wrong_same
+        + summary.both_wrong_changed
+    ) == summary.word_count
+    assert summary.top1_changed == (
+        summary.corrected
+        + summary.regressed
+        + summary.both_wrong_changed
+    )
+    assert (
+        summary.gold_rank_improved
+        + summary.gold_rank_worsened
+        + summary.gold_rank_unchanged
+    ) == summary.word_count
+
     by_word = {row.word_id: row for row in result.rows}
     assert [row.word_id for row in result.rows] == [601, 602, 603, 604, 605]
 
@@ -400,31 +419,13 @@ def test_reversed_inputs_preserve_roles_and_deltas():
     forward = compare_rankings(instances, a_rows, b_rows)
     reversed_ = compare_rankings(instances, b_rows, a_rows)
 
-    assert forward.selection_reason == reversed_.selection_reason
     assert (forward.a_input_index, forward.b_input_index) == (1, 2)
     assert (reversed_.a_input_index, reversed_.b_input_index) == (2, 1)
+    assert reversed_.selection_reason == forward.selection_reason
 
-    fwd_by_word = {row.word_id: row for row in forward.rows}
-    rev_by_word = {row.word_id: row for row in reversed_.rows}
-    for word_id, fwd in fwd_by_word.items():
-        rev = rev_by_word[word_id]
-        assert (rev.a_top1_wordform_id, rev.a_top1_gramset) == (
-            fwd.a_top1_wordform_id,
-            fwd.a_top1_gramset,
-        )
-        assert (rev.b_top1_wordform_id, rev.b_top1_gramset) == (
-            fwd.b_top1_wordform_id,
-            fwd.b_top1_gramset,
-        )
-        assert rev.a_gold_rank == fwd.a_gold_rank
-        assert rev.b_gold_rank == fwd.b_gold_rank
-        assert rev.outcome == fwd.outcome
-
-    assert reversed_.overall.delta_mrr == pytest.approx(forward.overall.delta_mrr)
-    assert reversed_.overall.delta_top1 == pytest.approx(forward.overall.delta_top1)
-    assert reversed_.overall.word_count == forward.overall.word_count
-    assert set(reversed_.by_language) == set(forward.by_language)
-    assert reversed_.by_language["krl"].word_count == 3
+    assert reversed_.rows == forward.rows
+    assert reversed_.overall == forward.overall
+    assert reversed_.by_language == forward.by_language
 
 
 def test_global_roles_preserved_in_language_deltas_and_empty_group():

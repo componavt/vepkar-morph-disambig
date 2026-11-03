@@ -22,15 +22,6 @@ from core.metrics import (
     compute_ranking_metrics,
 )
 
-_OUTCOMES = (
-    "both_correct",
-    "corrected",
-    "regressed",
-    "both_wrong_same",
-    "both_wrong_changed",
-)
-
-
 @dataclass(frozen=True)
 class OccurrenceComparison:
     """One compared occurrence of a word across both inputs."""
@@ -188,7 +179,6 @@ def compare_rankings(
     a_top1, a_ranks = _build_lookups(a_preds)
     b_top1, b_ranks = _build_lookups(b_preds)
 
-    instance_by_word = {instance.word_id: instance for instance in instance_list}
     languages: dict[str, list[Instance]] = defaultdict(list)
     for instance in instance_list:
         languages[instance.language].append(instance)
