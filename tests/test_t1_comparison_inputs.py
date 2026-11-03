@@ -15,6 +15,7 @@ sys.path.insert(0, str(SRC))
 
 import benchmark_context  # noqa: E402
 from core.data import SUPPORTED_LANGUAGES, CorpusTables  # noqa: E402
+from core.metrics import MetricsInputError  # noqa: E402
 from t1_features import comparison_inputs  # noqa: E402
 from t1_features.comparison_inputs import (  # noqa: E402
     T1ComparisonInputError,
@@ -262,6 +263,23 @@ def _recursive_entries(root):
     return {path.relative_to(root).as_posix() for path in root.rglob("*")}
 
 
+def _track_temporary_directory(monkeypatch, tmp_path):
+    real = comparison_inputs.tempfile.TemporaryDirectory
+    owned = tmp_path / "owned-temp"
+    owned.mkdir(parents=True)
+    recorded = {}
+
+    def wrapped(*args, **kwargs):
+        kwargs = dict(kwargs)
+        kwargs["dir"] = str(owned)
+        td = real(*args, **kwargs)
+        recorded["path"] = Path(td.name)
+        return td
+
+    monkeypatch.setattr(comparison_inputs.tempfile, "TemporaryDirectory", wrapped)
+    return recorded
+
+
 def _snapshot_tables(tables):
     return {
         lang: {
@@ -330,6 +348,7 @@ class TestSuccess:
 
         loaded = load_t1_comparison(run_a, run_b, repo_root=repo_root)
 
+        assert len(validate_calls) == 2
         assert validate_calls[0][1] == "dev"
         assert validate_calls[1][1] == "dev"
         assert validate_calls[0][2] is validate_calls[1][2]
@@ -399,6 +418,7 @@ class TestSuccess:
         entries_b_before = _recursive_entries(run_b)
         expected_a = run_a / ("dev.csv.zst" if spec["a"] == "compressed" else "dev.csv")
         expected_b = run_b / ("dev.csv.zst" if spec["b"] == "compressed" else "dev.csv")
+        tracked = _track_temporary_directory(monkeypatch, tmp_path)
 
         loaded = load_t1_comparison(run_a, run_b, repo_root=repo_root)
 
@@ -407,6 +427,8 @@ class TestSuccess:
         assert loaded.comparison.overall.word_count == 3
         assert _recursive_entries(run_a) == entries_a_before
         assert _recursive_entries(run_b) == entries_b_before
+        assert "path" in tracked
+        assert not tracked["path"].exists()
 
 
 class TestConfig:
@@ -482,9 +504,10 @@ class TestFailures:
             ({"format_version": True}, "unsupported T1 metrics format_version"),
             ({"parameters": {"C": "high"}}, "parameters.C is not a number"),
             ({"data": {"tag": "a/b", "commit": _COMMIT, "split_sha256": _SPLIT_SHA256}}, "safe filename"),
+            ({"data": {"tag": "a\x00b", "commit": _COMMIT, "split_sha256": _SPLIT_SHA256}}, "safe filename"),
             ({"data": {"tag": _TAG, "commit": "", "split_sha256": _SPLIT_SHA256}}, "data.commit must be a nonempty"),
         ],
-        ids=["format", "format_version-bool", "bad-C", "bad-tag", "empty-commit"],
+        ids=["format", "format_version-bool", "bad-C", "bad-tag", "null-tag", "empty-commit"],
     )
     def test_malformed_metadata(self, tmp_path, monkeypatch, mutate, match):
         _forbid_corpus(monkeypatch)
@@ -528,6 +551,7 @@ class TestInvalidPredictions:
         )
         run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
         entries_a_before = _recursive_entries(run_a)
+        tracked = _track_temporary_directory(monkeypatch, tmp_path)
 
         with pytest.raises(T1ComparisonInputError) as excinfo:
             load_t1_comparison(run_a, run_b, repo_root=repo_root)
@@ -536,6 +560,8 @@ class TestInvalidPredictions:
         assert excinfo.value.validation.is_valid is False
         assert excinfo.value.validation.predicted_candidate_count < excinfo.value.validation.expected_candidate_count
         assert _recursive_entries(run_a) == entries_a_before
+        assert "path" in tracked
+        assert not tracked["path"].exists()
 
     def test_corrupt_zst_original_path_error(self, tmp_path, monkeypatch):
         _install_tables(monkeypatch)
@@ -564,6 +590,7 @@ class TestInvalidPredictions:
         )
         run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
         entries_a_before = _recursive_entries(run_a)
+        tracked = _track_temporary_directory(monkeypatch, tmp_path)
 
         with pytest.raises(T1ComparisonInputError) as excinfo:
             load_t1_comparison(run_a, run_b, repo_root=repo_root)
@@ -572,6 +599,8 @@ class TestInvalidPredictions:
         assert "dev.csv.zst" in message
         assert "dev_input" not in message
         assert _recursive_entries(run_a) == entries_a_before
+        assert "path" in tracked
+        assert not tracked["path"].exists()
 
 
 class TestNoFingerprint:
@@ -608,3 +637,89 @@ class TestNoFingerprint:
         assert loaded.comparison.overall.delta_top1 == pytest.approx(2 / 3)
         assert loaded.source_1.split_sha256 == "1" * 64
         assert loaded.source_2.split_sha256 == "1" * 64
+
+
+class TestLifecycleAndBenchmark:
+    @pytest.mark.parametrize("mode", ["creation", "cleanup"], ids=["creation", "cleanup"])
+    def test_temporary_workspace_oserror_wrapped(
+        self, tmp_path, monkeypatch, mode
+    ):
+        _install_tables(monkeypatch)
+        repo_root, _ = _setup_repo(tmp_path)
+        _stub_preflight(monkeypatch, repo_root / "data" / "dictorpus-data")
+        run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES)
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
+        owned = tmp_path / "owned"
+        owned.mkdir()
+
+        real = comparison_inputs.tempfile.TemporaryDirectory
+        if mode == "creation":
+
+            def fail_creation(*args, **kwargs):
+                raise OSError("temporary creation denied")
+
+            monkeypatch.setattr(
+                comparison_inputs.tempfile, "TemporaryDirectory", fail_creation
+            )
+        else:
+            def wrapped(*args, **kwargs):
+                kwargs = dict(kwargs)
+                kwargs["dir"] = str(owned)
+                td = real(*args, **kwargs)
+
+                class FailingTemporaryDirectory:
+                    def __enter__(self):
+                        return td.name
+
+                    def __exit__(self, etype, value, tb):
+                        td.cleanup()
+                        raise OSError("temporary cleanup denied")
+
+                return FailingTemporaryDirectory()
+
+            monkeypatch.setattr(
+                comparison_inputs.tempfile, "TemporaryDirectory", wrapped
+            )
+
+        with pytest.raises(T1ComparisonInputError) as excinfo:
+            load_t1_comparison(run_a, run_b, repo_root=repo_root)
+
+        assert "temporary workspace" in str(excinfo.value)
+        assert str(run_a / "dev.csv") in str(excinfo.value)
+        assert str(run_b / "dev.csv") in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, OSError)
+
+    def test_benchmark_split_undecodable(self, tmp_path, monkeypatch):
+        _install_tables(monkeypatch)
+        repo_root, split_path = _setup_repo(tmp_path)
+        _stub_preflight(monkeypatch, repo_root / "data" / "dictorpus-data")
+        split_path.write_bytes(b"language,text_id,split\nkrl,1,\xff\xfe\n")
+        run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES)
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
+
+        with pytest.raises(T1ComparisonInputError) as excinfo:
+            load_t1_comparison(run_a, run_b, repo_root=repo_root)
+
+        assert str(split_path) in str(excinfo.value)
+        assert isinstance(excinfo.value.__cause__, UnicodeDecodeError)
+
+    def test_metrics_input_error_context(self, tmp_path, monkeypatch):
+        _install_tables(monkeypatch)
+        repo_root, _ = _setup_repo(tmp_path)
+        _stub_preflight(monkeypatch, repo_root / "data" / "dictorpus-data")
+        run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES)
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
+
+        def failing_compare(*args, **kwargs):
+            raise MetricsInputError("distinctive core failure")
+
+        monkeypatch.setattr(comparison_inputs, "compare_rankings", failing_compare)
+
+        with pytest.raises(T1ComparisonInputError) as excinfo:
+            load_t1_comparison(run_a, run_b, repo_root=repo_root)
+
+        message = str(excinfo.value)
+        assert "distinctive core failure" in message
+        assert str(run_a / "dev.csv") in message
+        assert str(run_b / "dev.csv") in message
+        assert isinstance(excinfo.value.__cause__, MetricsInputError)

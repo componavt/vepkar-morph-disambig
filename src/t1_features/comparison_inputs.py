@@ -78,7 +78,7 @@ class T1LoadedComparison:
 
 
 def _check_tag_safe(tag: str, metrics_path: Path) -> None:
-    if "/" in tag or "\\" in tag or tag in (".", ".."):
+    if "/" in tag or "\\" in tag or "\x00" in tag or tag in (".", ".."):
         raise T1ComparisonInputError(
             f"invalid T1 metrics {metrics_path}: data.tag {tag!r} is not a "
             "safe filename component"
@@ -277,6 +277,7 @@ def load_t1_comparison(
     _check_metadata_compatible(source_1, source_2)
 
     common_tag = source_1.data_tag
+    published_split_path: Path | None = None
     try:
         config = load_t1_config(repo_root)
         data_dir, local_tag = _preflight_benchmark(config.data_dir)
@@ -293,39 +294,51 @@ def load_t1_comparison(
         )
     except T1ComparisonInputError:
         raise
-    except (T1ConfigError, DataError, CorpusTagError, SplitError) as exc:
+    except (T1ConfigError, DataError, CorpusTagError, SplitError, UnicodeDecodeError) as exc:
+        split_detail = (
+            f" (split {published_split_path})"
+            if published_split_path is not None
+            else ""
+        )
         raise T1ComparisonInputError(
-            f"cannot prepare the common benchmark for tag {common_tag!r}: {exc}"
+            f"cannot prepare the common benchmark for tag {common_tag!r}"
+            f"{split_detail}: {exc}"
         ) from exc
 
-    with tempfile.TemporaryDirectory(prefix="vepkar-t1-compare-") as temp:
-        temp_dir = Path(temp)
-        readable_1 = _prepare_readable(source_1.predictions_path, temp_dir, 1)
-        readable_2 = _prepare_readable(source_2.predictions_path, temp_dir, 2)
-        rows_1 = _validate_and_load(readable_1, source_1, benchmark)
-        rows_2 = _validate_and_load(readable_2, source_2, benchmark)
+    try:
+        with tempfile.TemporaryDirectory(prefix="vepkar-t1-compare-") as temp:
+            temp_dir = Path(temp)
+            readable_1 = _prepare_readable(source_1.predictions_path, temp_dir, 1)
+            readable_2 = _prepare_readable(source_2.predictions_path, temp_dir, 2)
+            rows_1 = _validate_and_load(readable_1, source_1, benchmark)
+            rows_2 = _validate_and_load(readable_2, source_2, benchmark)
 
-        dev_texts = {
-            (language, text_id)
-            for language, text_id, split in benchmark.split_rows
-            if split == _TARGET_SPLIT
-        }
-        dev_instances = [
-            instance
-            for instance in benchmark.instances
-            if (instance.language, instance.text_id) in dev_texts
-        ]
+            dev_texts = {
+                (language, text_id)
+                for language, text_id, split in benchmark.split_rows
+                if split == _TARGET_SPLIT
+            }
+            dev_instances = [
+                instance
+                for instance in benchmark.instances
+                if (instance.language, instance.text_id) in dev_texts
+            ]
 
-        try:
-            comparison = compare_rankings(dev_instances, rows_1, rows_2)
-        except MetricsInputError as exc:
-            raise T1ComparisonInputError(
-                f"comparison of T1 predictions {source_1.predictions_path} and "
-                f"{source_2.predictions_path} failed"
-            ) from exc
-
-    return T1LoadedComparison(
-        source_1=source_1,
-        source_2=source_2,
-        comparison=comparison,
-    )
+            try:
+                comparison = compare_rankings(dev_instances, rows_1, rows_2)
+            except MetricsInputError as exc:
+                raise T1ComparisonInputError(
+                    f"comparison of T1 predictions {source_1.predictions_path} and "
+                    f"{source_2.predictions_path} failed: {exc}"
+                ) from exc
+            result = T1LoadedComparison(
+                source_1=source_1,
+                source_2=source_2,
+                comparison=comparison,
+            )
+    except OSError as exc:
+        raise T1ComparisonInputError(
+            f"T1 comparison temporary workspace failed for "
+            f"{source_1.predictions_path} and {source_2.predictions_path}: {exc}"
+        ) from exc
+    return result
