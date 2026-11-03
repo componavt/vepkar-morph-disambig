@@ -15,6 +15,7 @@ from commands.benchmark_reports import (
     _print_split_report,
 )
 from commands.build_instances import _run_build_instances
+from commands.compare_t1_runs import _run_compare_t1_runs
 from commands.diagnose_frequency_baseline import _run_diagnose_frequency_baseline
 from commands.evaluate_predictions import (
     run_evaluate_predictions,
@@ -291,6 +292,27 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Existing finished T1 run directory",
     )
+    compare_t1_runs = commands.add_parser(
+        "compare-t1-runs",
+        help="Compare two completed T1.1 dev runs and publish a comparative CSV",
+        allow_abbrev=False,
+    )
+    compare_t1_runs.add_argument(
+        "--run-dirs",
+        type=Path,
+        nargs=2,
+        required=True,
+        help="Two existing completed T1 run directories (dev split)",
+    )
+    compare_t1_runs.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit comparative CSV destination "
+            "(default: automatic path under work/comparisons)"
+        ),
+    )
     return parser
 
 
@@ -323,6 +345,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_prepare_t1_run(args)
     if args.command == "export-t1-milestone":
         return _run_export_t1_milestone(args)
+    if args.command == "compare-t1-runs":
+        return _run_compare_t1_runs(args)
     parser.print_help()
     return 0
 
