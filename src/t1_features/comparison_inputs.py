@@ -17,6 +17,7 @@ import json
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import zstandard
 
@@ -305,9 +306,8 @@ def load_t1_comparisons(
     """
     resolved = _resolve_run_dirs(run_dirs)
     sources = tuple(_load_source(path) for path in resolved)
-    for i in range(len(sources)):
-        for j in range(i + 1, len(sources)):
-            _check_metadata_compatible(sources[i], sources[j])
+    for source in sources[1:]:
+        _check_metadata_compatible(sources[0], source)
 
     common_tag = sources[0].data_tag
     published_split_path: Path | None = None

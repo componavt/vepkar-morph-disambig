@@ -784,13 +784,18 @@ class TestCliSuccess:
         captured = capsys.readouterr()
         assert status == 0, captured.err
         out = captured.out
-        assert "Best runs" in out
-        assert "Top-1" in out
-        assert "0.6000" in out
-        assert "MRR" in out
-        assert "0.7500" in out
-        assert "Top-3" in out
-        assert "1.0000" in out
+        lines = out.splitlines()
+        start = lines.index("Best runs")
+        rows = []
+        for line in lines[start + 2:]:
+            if not line.strip():
+                break
+            rows.append(line.split())
+        assert rows == [
+            ["Top-1", "2", "C=2", "0.6000"],
+            ["MRR", "2", "C=2", "0.7500"],
+            ["Top-3", "4", "C=4", "1.0000"],
+        ]
         assert "4→1" in out
 
     def test_unique_source_leads_all_three_metrics(self, tmp_path, monkeypatch, capsys):
