@@ -2,6 +2,7 @@
 
 import csv
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,7 @@ from core.ranking_comparison import compare_rankings  # noqa: E402
 from t1_features.comparison_inputs import (  # noqa: E402
     T1ComparisonSource,
     T1LoadedComparison,
+    T1LoadedComparisonBatch,
 )
 from t1_features.comparison_output import COMPARISON_HEADER  # noqa: E402
 
@@ -334,6 +336,57 @@ def _stub_loaded(comparison, c1=1.0, c2=0.5):
     )
 
 
+def _stub_batch(comparisons):
+    """Build a batch keeping sources in first-appearance input order."""
+    sources: list[T1ComparisonSource] = []
+    for pair in comparisons:
+        for source in (pair.source_1, pair.source_2):
+            if all(source.run_dir != existing.run_dir for existing in sources):
+                sources.append(source)
+    return T1LoadedComparisonBatch(
+        sources=tuple(sources), comparisons=tuple(comparisons)
+    )
+
+
+def _rank_batch(specs, c_values=None):
+    """Build a real-core batch from per-source per-word candidate rank lists.
+
+    ``specs`` maps a 1-based source index to a dict of ``word_id -> ranks``,
+    where ``ranks`` assigns the five candidates 0..4 their ranks and the gold
+    analysis is candidate index 1.  ``c_values`` optionally overrides each
+    source's C value (defaults to its index).
+    """
+    if c_values is None:
+        c_values = {index: float(index) for index in specs}
+    instances = tuple(_occurrence(word_id) for word_id in range(1, 6))
+    preds = {}
+    for index, word_ranks in specs.items():
+        rows = []
+        for word_id in range(1, 6):
+            rows.extend(_pred_rows(word_id, word_ranks[word_id]))
+        preds[index] = tuple(rows)
+    sources = tuple(
+        _stub_source(f"/experiments/s{index}", c_values[index])
+        for index in sorted(specs)
+    )
+    comparisons = []
+    for i in range(len(sources)):
+        for j in range(i + 1, len(sources)):
+            comparison = compare_rankings(instances, preds[i + 1], preds[j + 1])
+            comparisons.append(
+                T1LoadedComparison(sources[i], sources[j], comparison)
+            )
+    return _stub_batch(comparisons)
+
+
+_GOLD_RANK1 = {word_id: [2, 1, 3, 4, 5] for word_id in range(1, 6)}
+_GOLD_RANK2 = {word_id: [1, 2, 3, 4, 5] for word_id in range(1, 6)}
+_GOLD_RANK4 = dict(_GOLD_RANK2)
+_GOLD_RANK4[1] = [1, 4, 5, 2, 3]
+_GOLD_RANK5 = dict(_GOLD_RANK2)
+_GOLD_RANK5[1] = [1, 5, 2, 3, 4]
+
+
 def _cli_setup(tmp_path, monkeypatch):
     _install_tables(monkeypatch)
     repo_root, _ = _setup_repo(tmp_path)
@@ -351,35 +404,50 @@ def _cli_packages(tmp_path):
     return run_a, run_b
 
 
+def _cli_three_packages(tmp_path):
+    run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES, C=1.0)
+    run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES, C=0.1)
+    run_c = _make_package(tmp_path / "runs" / "run-c", INPUT1_BYTES, C=5.0)
+    return run_a, run_b, run_c
+
+
+def _stub_load(monkeypatch, batch):
+    import commands.compare_t1_runs as compare_pkg
+
+    monkeypatch.setattr(
+        compare_pkg,
+        "load_t1_comparisons",
+        lambda run_dirs, *, repo_root: batch,
+    )
+
+
+def _comparisons_dir(repo_root):
+    return repo_root / "work" / "comparisons" / _TAG
+
+
 class TestParser:
-    def test_requires_two_run_dirs_and_optional_output(self):
+    def test_variable_input_count_and_no_output(self):
         import cli
 
         parser = cli.build_parser()
         args = parser.parse_args(["compare-t1-runs", "--run-dirs", "one", "two"])
         assert args.command == "compare-t1-runs"
         assert args.run_dirs == [Path("one"), Path("two")]
-        assert args.output is None
+        assert not hasattr(args, "output")
 
         args = parser.parse_args(
-            ["compare-t1-runs", "--run-dirs", "one", "two", "--output", "out.csv"]
+            ["compare-t1-runs", "--run-dirs", "one", "two", "three"]
         )
-        assert args.run_dirs == [Path("one"), Path("two")]
-        assert args.output == Path("out.csv")
+        assert args.run_dirs == [Path("one"), Path("two"), Path("three")]
 
-    def test_rejects_abbreviated_and_unsupported_options(self):
+    def test_rejects_abbreviated_unsupported_and_output(self):
         import cli
 
         parser = cli.build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["compare-t1-runs"])
-        for extra in (
-            ["--run-dirs", "one"],
-            ["--run-dirs", "one", "two", "three"],
-        ):
-            with pytest.raises(SystemExit):
-                parser.parse_args(["compare-t1-runs", *extra])
         for bad in (
+            ["--run-dirs", "one", "two", "--output", "out.csv"],
             ["--run-dirs", "one", "two", "--force"],
             ["--run-dirs", "one", "two", "--reference", "x"],
             ["--run-dirs", "one", "two", "--candidate", "x"],
@@ -398,10 +466,31 @@ class TestParser:
 
         with pytest.raises(SystemExit):
             cli.main(["compare-t1-runs", "--run-dirs", "a", "b", "--force"])
+        with pytest.raises(SystemExit):
+            cli.main(["compare-t1-runs", "--run-dirs", "a", "b", "--output", "x"])
+
+    def test_cli_requires_at_least_two_before_loading(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import cli
+        import commands.compare_t1_runs as compare_pkg
+
+        repo_root = tmp_path / "repo"
+        monkeypatch.setattr(compare_pkg, "_PROJECT_ROOT", repo_root)
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("loading must not start below the minimum input count")
+
+        monkeypatch.setattr(compare_pkg, "load_t1_comparisons", forbidden)
+
+        status = cli.main(["compare-t1-runs", "--run-dirs", "only-one"])
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "at least 2 run directories" in captured.err
 
 
 class TestCliSuccess:
-    def test_success_automatic_path_real_core(self, tmp_path, monkeypatch, capsys):
+    def test_n2_automatic_path_real_core(self, tmp_path, monkeypatch, capsys):
         _install_tables(monkeypatch)
         repo_root, split_path = _setup_repo(tmp_path)
         recorded = _stub_preflight(
@@ -429,29 +518,18 @@ class TestCliSuccess:
         assert status == 0, captured.err
         assert captured.err == ""
         out = captured.out
-        assert "T1 comparison: OK" in out
-        assert f"A: {run_a.resolve()} (t1.1, C=1)" in out
-        assert f"B: {run_b.resolve()} (t1.1, C=0.1)" in out
-        assert "B selected by Top-1" in out
-        assert "Evaluated: 3 word instances, 8 candidate rows" in out
-        assert "Top-1 accuracy 0.3333  1.0000  +0.6667" in out
-        assert "MRR            0.5833  1.0000  +0.4167" in out
-        assert "Top-3 accuracy 0.6667  1.0000  +0.3333" in out
-        for line in (
-            "both_correct: 1",
-            "corrected: 2",
-            "regressed: 0",
-            "both_wrong_same: 0",
-            "both_wrong_changed: 0",
-            "top1_changed: 2",
-            "gold_rank_improved: 2",
-            "gold_rank_worsened: 0",
-            "gold_rank_unchanged: 1",
-        ):
-            assert line in out
-        assert "Delta top-1" in out
+        assert "T1 comparison: OK (2 sources, 1 pair)" in out
+        assert f"1  {run_a.resolve()}  t1.1  C=1" in out
+        assert f"2  {run_b.resolve()}  t1.1  C=0.1" in out
+        assert "1 vs 2" in out
+        assert "1→2" in out
+        assert "Top-1" in out
         assert "+0.6667" in out
-        assert "N/A" in out
+        assert "+0.4167" in out
+        assert "+0.3333" in out
+        assert "Best run: source 2 (C=0.1) leads all three metrics" in out
+        assert "Best Top-1:" not in out
+        assert "Best runs" not in out
 
         expected = (
             repo_root
@@ -461,8 +539,7 @@ class TestCliSuccess:
             / "t1.1-C1__vs__t1.1-C0.1.csv"
         )
         assert expected.is_file()
-        assert expected.parent.is_dir()
-        assert f"Comparison CSV: {expected}" in out
+        assert f"  1 vs 2  {expected}" in out
 
         parsed = _read_csv(expected)
         assert parsed[0] == COMPARISON_HEADER
@@ -490,6 +567,73 @@ class TestCliSuccess:
         assert added == {"work/comparisons/fixture-tag/t1.1-C1__vs__t1.1-C0.1.csv"}
         assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
 
+    def test_n3_generates_all_three_csvs_with_one_benchmark(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _install_tables(monkeypatch)
+        repo_root, split_path = _setup_repo(tmp_path)
+        _stub_preflight(monkeypatch, repo_root / "data" / "dictorpus-data")
+        import cli
+        import commands.compare_t1_runs as compare_pkg
+        import t1_features.comparison_inputs as input_pkg
+
+        monkeypatch.setattr(compare_pkg, "_PROJECT_ROOT", repo_root)
+
+        real_benchmark = input_pkg.load_benchmark_context
+        benchmark_calls = {"n": 0}
+
+        def spy_benchmark(*args, **kwargs):
+            benchmark_calls["n"] += 1
+            return real_benchmark(*args, **kwargs)
+
+        monkeypatch.setattr(input_pkg, "load_benchmark_context", spy_benchmark)
+
+        run_a = _make_package(
+            tmp_path / "runs" / "run-a", INPUT1_BYTES, C=1.0, compressed=True
+        )
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES, C=0.1)
+        run_c = _make_package(tmp_path / "runs" / "run-c", INPUT1_BYTES, C=5.0)
+        entries = {
+            path: _recursive_entries(path) for path in (run_a, run_b, run_c)
+        }
+        split_before = split_path.read_bytes()
+
+        status = cli.main(
+            [
+                "compare-t1-runs",
+                "--run-dirs",
+                str(run_a), str(run_b), str(run_c),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        assert benchmark_calls["n"] == 1
+        out = captured.out
+        assert "T1 comparison: OK (3 sources, 3 pairs)" in out
+        assert "1 vs 2" in out
+        assert "1 vs 3" in out
+        assert "2 vs 3" in out
+        assert "Best run: source 2 (C=0.1) leads all three metrics" in out
+        assert "Best Top-1:" not in out
+        assert "Best runs" not in out
+
+        expected_names = {
+            "t1.1-C1__vs__t1.1-C0.1.csv",
+            "t1.1-C1__vs__t1.1-C5.csv",
+            "t1.1-C5__vs__t1.1-C0.1.csv",
+        }
+        csvs = sorted(_comparisons_dir(repo_root).glob("*.csv"))
+        assert {path.name for path in csvs} == expected_names
+        for path in csvs:
+            parsed = _read_csv(path)
+            assert parsed[0] == COMPARISON_HEADER
+            assert len(parsed) - 1 == 3
+
+        for path in (run_a, run_b, run_c):
+            assert _recursive_entries(path) == entries[path]
+        assert split_path.read_bytes() == split_before
+        assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
+
     def test_reversal_preserves_ab_roles_path_and_csv(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -502,9 +646,8 @@ class TestCliSuccess:
         )
         captured = capsys.readouterr()
         assert status == 0, captured.err
-        assert f"A: {run_a.resolve()} (t1.1, C=1)" in captured.out
-        assert f"B: {run_b.resolve()} (t1.1, C=0.1)" in captured.out
-        assert "B selected by Top-1" in captured.out
+        assert f"1  {run_a.resolve()}  t1.1  C=1" in captured.out
+        assert f"2  {run_b.resolve()}  t1.1  C=0.1" in captured.out
         expected = (
             repo_root
             / "work"
@@ -513,7 +656,6 @@ class TestCliSuccess:
             / "t1.1-C1__vs__t1.1-C0.1.csv"
         )
         assert expected.is_file()
-        assert f"Comparison CSV: {expected}" in captured.out
         first_bytes = expected.read_bytes()
 
         expected.unlink()
@@ -524,10 +666,8 @@ class TestCliSuccess:
         )
         captured = capsys.readouterr()
         assert status == 0, captured.err
-        assert f"A: {run_a.resolve()} (t1.1, C=1)" in captured.out
-        assert f"B: {run_b.resolve()} (t1.1, C=0.1)" in captured.out
-        assert "B selected by Top-1" in captured.out
-        assert f"Comparison CSV: {expected}" in captured.out
+        assert f"1  {run_b.resolve()}  t1.1  C=0.1" in captured.out
+        assert f"2  {run_a.resolve()}  t1.1  C=1" in captured.out
         assert expected.is_file()
         assert expected.read_bytes() == first_bytes
 
@@ -543,10 +683,8 @@ class TestCliSuccess:
         )
         captured = capsys.readouterr()
         assert status == 0, captured.err
-        assert "Tie on all three metrics; input order preserved" in captured.out
-        assert f"A: {run_x.resolve()} (t1.1, C=1)" in captured.out
-        assert f"B: {run_y.resolve()} (t1.1, C=1)" in captured.out
-        assert "+0.0000" in captured.out
+        assert "1→2" in captured.out
+        assert "tie" in captured.out
         expected = (
             repo_root
             / "work"
@@ -556,11 +694,12 @@ class TestCliSuccess:
         )
         assert expected.is_file()
 
-    def test_explicit_relative_output_uses_caller_cwd(
+    def test_relative_inputs_resolve_from_foreign_cwd(
         self, tmp_path, monkeypatch, capsys
     ):
         cli, repo_root = _cli_setup(tmp_path, monkeypatch)
-        run_a, run_b = _cli_packages(tmp_path)
+        run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES, C=1.0)
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES, C=0.1)
         foreign = tmp_path / "foreign-cwd"
         foreign.mkdir()
         monkeypatch.chdir(foreign)
@@ -568,18 +707,23 @@ class TestCliSuccess:
         status = cli.main(
             [
                 "compare-t1-runs",
-                "--run-dirs", str(run_a), str(run_b),
-                "--output", "relative-out.csv",
+                "--run-dirs", "../runs/run-a", "../runs/run-b",
             ]
         )
         captured = capsys.readouterr()
         assert status == 0, captured.err
-        out_path = foreign / "relative-out.csv"
-        assert out_path.is_file()
-        assert f"Comparison CSV: {out_path}" in captured.out
-        assert not (repo_root / "work").exists()
+        assert f"1  {run_a.resolve()}  t1.1  C=1" in captured.out
+        assert f"2  {run_b.resolve()}  t1.1  C=0.1" in captured.out
+        expected = (
+            repo_root
+            / "work"
+            / "comparisons"
+            / _TAG
+            / "t1.1-C1__vs__t1.1-C0.1.csv"
+        )
+        assert expected.is_file()
 
-    def test_report_formats_signed_deltas_and_na(
+    def test_report_formats_signed_deltas_and_ab_indices(
         self, tmp_path, monkeypatch, capsys
     ):
         import cli
@@ -587,26 +731,22 @@ class TestCliSuccess:
 
         repo_root = tmp_path / "repo"
         monkeypatch.setattr(compare_pkg, "_PROJECT_ROOT", repo_root)
-        loaded = _stub_loaded(_negative_delta_comparison())
-        monkeypatch.setattr(
-            compare_pkg,
-            "load_t1_comparison",
-            lambda d1, d2, *, repo_root: loaded,
-        )
+        batch = _stub_batch([_stub_loaded(_negative_delta_comparison())])
+        _stub_load(monkeypatch, batch)
 
         status = cli.main(["compare-t1-runs", "--run-dirs", "/x/one", "/x/two"])
         captured = capsys.readouterr()
         assert status == 0, captured.err
         out = captured.out
-        assert "T1 comparison: OK" in out
-        assert "B selected by Top-1" in out
-        assert "Top-1 accuracy 0.0000  0.3333  +0.3333" in out
-        assert "MRR            0.5000  0.4667  -0.0333" in out
-        assert "Top-3 accuracy 1.0000  0.3333  -0.6667" in out
-        assert "N/A" in out
-        assert "-0.0333" in out
+        assert "T1 comparison: OK (2 sources, 1 pair)" in out
+        assert "1→2" in out
         assert "+0.3333" in out
+        assert "-0.0333" in out
         assert "-0.6667" in out
+        assert "Best Top-1: 2 (C=0.5) 0.3333" in out
+        assert "Best MRR: 1 (C=1) 0.5000" in out
+        assert "Best Top-3: 1 (C=1) 1.0000" in out
+        assert "Best runs" not in out
         expected = (
             repo_root
             / "work"
@@ -615,6 +755,85 @@ class TestCliSuccess:
             / "t1.1-C1__vs__t1.1-C0.5.csv"
         )
         assert expected.is_file()
+
+    def test_n4_leader_table_different_maximizers(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import cli
+        import commands.compare_t1_runs as compare_pkg
+
+        repo_root = tmp_path / "repo"
+        monkeypatch.setattr(compare_pkg, "_PROJECT_ROOT", repo_root)
+        specs = {
+            1: _GOLD_RANK4,
+            2: {**{w: [2, 1, 3, 4, 5] for w in (1, 2, 3)},
+                **{4: [1, 2, 3, 4, 5]}, **{5: [1, 4, 5, 2, 3]}},
+            3: _GOLD_RANK5,
+            4: {**{w: [1, 2, 3, 4, 5] for w in (1, 2)},
+                **{w: [2, 3, 1, 4, 5] for w in (3, 4, 5)}},
+        }
+        batch = _rank_batch(specs)
+        _stub_load(monkeypatch, batch)
+
+        status = cli.main(
+            [
+                "compare-t1-runs",
+                "--run-dirs", "/x/s1", "/x/s2", "/x/s3", "/x/s4",
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        out = captured.out
+        assert "Best runs" in out
+        assert "Top-1" in out
+        assert "0.6000" in out
+        assert "MRR" in out
+        assert "0.7500" in out
+        assert "Top-3" in out
+        assert "1.0000" in out
+        assert "4→1" in out
+
+    def test_unique_source_leads_all_three_metrics(self, tmp_path, monkeypatch, capsys):
+        import cli
+        import commands.compare_t1_runs as compare_pkg
+
+        repo_root = tmp_path / "repo"
+        monkeypatch.setattr(compare_pkg, "_PROJECT_ROOT", repo_root)
+        specs = {1: _GOLD_RANK4, 2: _GOLD_RANK1, 3: _GOLD_RANK4}
+        batch = _rank_batch(specs)
+        _stub_load(monkeypatch, batch)
+
+        status = cli.main(
+            ["compare-t1-runs", "--run-dirs", "/x/s1", "/x/s2", "/x/s3"]
+        )
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        out = captured.out
+        assert "Best run: source 2 (C=2) leads all three metrics" in out
+        assert "Best runs" not in out
+        assert "Best Top-1:" not in out
+
+    def test_metric_ties_list_all_maximizers(self, tmp_path, monkeypatch, capsys):
+        import cli
+        import commands.compare_t1_runs as compare_pkg
+
+        repo_root = tmp_path / "repo"
+        monkeypatch.setattr(compare_pkg, "_PROJECT_ROOT", repo_root)
+        specs = {1: _GOLD_RANK1, 2: _GOLD_RANK1, 3: _GOLD_RANK4}
+        batch = _rank_batch(specs, c_values={1: 1.0, 2: 2.0, 3: 3.0})
+        _stub_load(monkeypatch, batch)
+
+        status = cli.main(
+            ["compare-t1-runs", "--run-dirs", "/x/s1", "/x/s2", "/x/s3"]
+        )
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        out = captured.out
+        assert "Best Top-1: 1, 2 (C=1, C=2) 1.0000" in out
+        assert "Best MRR: 1, 2 (C=1, C=2) 1.0000" in out
+        assert "Best Top-3: 1, 2 (C=1, C=2) 1.0000" in out
+        assert "Best runs" not in out
+        assert "Best run: source" not in out
 
 
 class TestCliFailures:
@@ -668,9 +887,36 @@ class TestCliFailures:
         assert "temporary workspace cleanup failed" in captured.err
         assert "temporary cleanup denied" in captured.err
         assert "T1 comparison: OK" not in captured.out
-        assert "Comparison CSV:" not in captured.out
         assert not (repo_root / "work").exists()
         assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
+
+    def test_invalid_later_input_prevents_any_output(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        _install_tables(monkeypatch)
+        repo_root, _ = _setup_repo(tmp_path)
+        _stub_preflight(monkeypatch, repo_root / "data" / "dictorpus-data")
+        import cli
+        import commands.compare_t1_runs as compare_pkg
+
+        monkeypatch.setattr(compare_pkg, "_PROJECT_ROOT", repo_root)
+
+        run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES)
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
+        run_c = _make_package(tmp_path / "runs" / "run-c", _INCOMPLETE_BYTES)
+
+        status = cli.main(
+            [
+                "compare-t1-runs",
+                "--run-dirs", str(run_a), str(run_b), str(run_c),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "Predictions validation: FAILED" in captured.out
+        assert "error: invalid T1 predictions" in captured.err
+        assert not (repo_root / "work").exists()
+        assert "T1 comparison: OK" not in captured.out
 
     def test_automatic_collision_refuses_overwrite(
         self, tmp_path, monkeypatch, capsys
@@ -699,35 +945,104 @@ class TestCliFailures:
         )
         captured = capsys.readouterr()
         assert status == 1
-        assert "destination already exists" in captured.err
+        assert "already exists" in captured.err
         assert str(expected) in captured.err
-        assert "--output" in captured.err
+        assert "--output" not in captured.err
         assert expected.read_bytes() == first_bytes
         assert _files(repo_root) == files_before
         assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
         assert "T1 comparison: OK" not in captured.out
 
-    def test_explicit_output_requires_existing_parent(
+    def test_internal_short_name_collision_produces_no_output(
         self, tmp_path, monkeypatch, capsys
     ):
         cli, repo_root = _cli_setup(tmp_path, monkeypatch)
-        run_a, run_b = _cli_packages(tmp_path)
-        missing_parent = tmp_path / "no-such-dir"
+        run_x = _make_package(tmp_path / "runs" / "run-x", INPUT1_BYTES, C=1.0)
+        run_y = _make_package(tmp_path / "runs" / "run-y", INPUT1_BYTES, C=1.0)
+        run_z = _make_package(tmp_path / "runs" / "run-z", INPUT2_BYTES, C=0.1)
 
         status = cli.main(
             [
                 "compare-t1-runs",
-                "--run-dirs", str(run_a), str(run_b),
-                "--output", str(missing_parent / "out.csv"),
+                "--run-dirs", str(run_x), str(run_y), str(run_z),
             ]
         )
         captured = capsys.readouterr()
         assert status == 1
-        assert "parent directory does not exist" in captured.err
-        assert str(missing_parent) in captured.err
-        assert not missing_parent.exists()
+        assert "collision" in captured.err
+        assert "1 vs 3" in captured.err
+        assert "2 vs 3" in captured.err
+        assert "t1.1-C1__vs__t1.1-C0.1.csv" in captured.err
+        assert not _comparisons_dir(repo_root).exists()
+        assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
+
+    def test_pre_existing_later_destination_prevents_earlier_writes(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        cli, repo_root = _cli_setup(tmp_path, monkeypatch)
+        run_a, run_b, run_c = _cli_three_packages(tmp_path)
+
+        later = _comparisons_dir(repo_root) / "t1.1-C5__vs__t1.1-C0.1.csv"
+        later.parent.mkdir(parents=True, exist_ok=True)
+        later.write_text("pre-existing later destination", encoding="utf-8")
+
+        status = cli.main(
+            [
+                "compare-t1-runs",
+                "--run-dirs", str(run_a), str(run_b), str(run_c),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "already exists" in captured.err
+        assert str(later) in captured.err
+        earlier = _comparisons_dir(repo_root) / "t1.1-C1__vs__t1.1-C0.1.csv"
+        assert not earlier.exists()
+        assert later.read_text(encoding="utf-8") == "pre-existing later destination"
+        assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
+
+    def test_later_write_failure_retains_earlier_csv_and_reports_partial(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        cli, repo_root = _cli_setup(tmp_path, monkeypatch)
+        run_a, run_b, run_c = _cli_three_packages(tmp_path)
+
+        later_destination = (
+            _comparisons_dir(repo_root) / "t1.1-C1__vs__t1.1-C5.csv"
+        )
+        real_link = os.link
+
+        def failing_link(src, dst):
+            if Path(dst) == later_destination:
+                raise OSError("link denied for later pair")
+            return real_link(src, dst)
+
+        monkeypatch.setattr(
+            "t1_features.comparison_output.os.link", failing_link
+        )
+
+        status = cli.main(
+            [
+                "compare-t1-runs",
+                "--run-dirs", str(run_a), str(run_b), str(run_c),
+            ]
+        )
+        captured = capsys.readouterr()
+        assert status == 1
+        err = captured.err
+        assert "error: comparison publication failed" in err
+        assert "completed: 1 of 3 comparisons" in err
+        assert "failed pair: 1 vs 3" in err
+        assert str(later_destination) in err
+        assert "already saved:" in err
+        first = _comparisons_dir(repo_root) / "t1.1-C1__vs__t1.1-C0.1.csv"
+        assert str(first) in err
+        assert "link denied for later pair" in err
+        assert first.is_file()
+        assert not later_destination.exists()
+        third = _comparisons_dir(repo_root) / "t1.1-C5__vs__t1.1-C0.1.csv"
+        assert not third.exists()
         assert "T1 comparison: OK" not in captured.out
-        assert not (repo_root / "work").exists()
 
     def test_writer_error_reports_path_diagnostic(
         self, tmp_path, monkeypatch, capsys
@@ -747,8 +1062,12 @@ class TestCliFailures:
         )
         captured = capsys.readouterr()
         assert status == 1
-        assert "error: cannot write comparison CSV" in captured.err
-        assert "link denied" in captured.err
+        err = captured.err
+        assert "error: comparison publication failed" in err
+        assert "failed pair: 1 vs 2" in err
+        assert "cannot write comparison CSV" in err
+        assert "link denied" in err
+        assert "completed: 0 of 1 comparisons" in err
         expected = (
             repo_root
             / "work"
@@ -759,30 +1078,6 @@ class TestCliFailures:
         assert not expected.exists()
         assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
         assert "T1 comparison: OK" not in captured.out
-
-    def test_publication_collision_hint_on_file_exists_error(
-        self, tmp_path, monkeypatch, capsys
-    ):
-        cli, repo_root = _cli_setup(tmp_path, monkeypatch)
-        run_a, run_b = _cli_packages(tmp_path)
-
-        def file_exists_link(src, dst):
-            raise FileExistsError("simulated publication collision")
-
-        monkeypatch.setattr(
-            "t1_features.comparison_output.os.link", file_exists_link
-        )
-
-        status = cli.main(
-            ["compare-t1-runs", "--run-dirs", str(run_a), str(run_b)]
-        )
-        captured = capsys.readouterr()
-        assert status == 1
-        assert "error: cannot write comparison CSV" in captured.err
-        assert "publish" in captured.err
-        assert "--output" in captured.err
-        assert "T1 comparison: OK" not in captured.out
-        assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
 
     def test_published_cleanup_failure_preserves_readable_csv(
         self, tmp_path, monkeypatch, capsys
@@ -800,10 +1095,9 @@ class TestCliFailures:
         )
         captured = capsys.readouterr()
         assert status == 1
-        assert (
-            "error: comparison CSV was published, but temporary cleanup failed:"
-            in captured.err
-        )
+        err = captured.err
+        assert "error: comparison publication failed" in err
+        assert "the failed pair's CSV was published, but temporary cleanup failed" in err
         expected = (
             repo_root
             / "work"
@@ -811,11 +1105,12 @@ class TestCliFailures:
             / _TAG
             / "t1.1-C1__vs__t1.1-C0.1.csv"
         )
-        assert f"destination: {expected}" in captured.err
+        assert f"retained CSV: {expected}" in err
         temps = list(expected.parent.glob(".vepkar-t1-comparison-*.tmp"))
         assert len(temps) == 1
-        assert f"temporary: {temps[0]}" in captured.err
-        assert "cleanup denied" in captured.err
+        assert f"temporary: {temps[0]}" in err
+        assert "cleanup denied" in err
+        assert "completed: 0 of 1 comparisons" in err
         assert "T1 comparison: OK" not in captured.out
 
         parsed = _read_csv(expected)

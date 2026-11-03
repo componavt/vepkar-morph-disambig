@@ -19,7 +19,9 @@ from core.metrics import MetricsInputError  # noqa: E402
 from t1_features import comparison_inputs  # noqa: E402
 from t1_features.comparison_inputs import (  # noqa: E402
     T1ComparisonInputError,
+    T1LoadedComparisonBatch,
     load_t1_comparison,
+    load_t1_comparisons,
 )
 
 _TAG = "fixture-tag"
@@ -793,3 +795,156 @@ class TestLifecycleAndBenchmark:
         assert str(run_a / "dev.csv") in message
         assert str(run_b / "dev.csv") in message
         assert isinstance(excinfo.value.__cause__, MetricsInputError)
+
+
+class TestBatchSuccess:
+    def test_three_sources_single_benchmark_and_pair_order(
+        self, tmp_path, monkeypatch
+    ):
+        _install_tables(monkeypatch)
+        repo_root, _ = _setup_repo(tmp_path)
+        _stub_preflight(monkeypatch, repo_root / "data" / "dictorpus-data")
+
+        run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES, C=0.1)
+        run_b = _make_package(
+            tmp_path / "runs" / "run-b", INPUT2_BYTES, C=10.0, compressed=True
+        )
+        run_c = _make_package(tmp_path / "runs" / "run-c", INPUT1_BYTES, C=5.0)
+
+        real_benchmark = comparison_inputs.load_benchmark_context
+        benchmark_calls = {"n": 0}
+
+        def spy_benchmark(*args, **kwargs):
+            benchmark_calls["n"] += 1
+            return real_benchmark(*args, **kwargs)
+
+        monkeypatch.setattr(
+            comparison_inputs, "load_benchmark_context", spy_benchmark
+        )
+
+        real_validate = comparison_inputs.validate_predictions
+        validate_calls = []
+
+        def spy_validate(path, split, instances, split_rows):
+            validate_calls.append((path, split, instances, split_rows))
+            return real_validate(path, split, instances, split_rows)
+
+        monkeypatch.setattr(comparison_inputs, "validate_predictions", spy_validate)
+
+        real_load_rows = comparison_inputs.load_ranked_predictions
+        load_calls = []
+
+        def spy_load_rows(path):
+            load_calls.append(path)
+            return real_load_rows(path)
+
+        monkeypatch.setattr(comparison_inputs, "load_ranked_predictions", spy_load_rows)
+
+        real_prepare = comparison_inputs._prepare_readable
+        prepared = []
+
+        def spy_prepare(predictions_path, temp_dir, index):
+            prepared.append((predictions_path, index))
+            return real_prepare(predictions_path, temp_dir, index)
+
+        monkeypatch.setattr(comparison_inputs, "_prepare_readable", spy_prepare)
+
+        real_compare = comparison_inputs.compare_rankings
+        compare_calls = []
+
+        def spy_compare(instances, p1, p2):
+            compare_calls.append((instances, p1, p2))
+            return real_compare(instances, p1, p2)
+
+        monkeypatch.setattr(comparison_inputs, "compare_rankings", spy_compare)
+
+        entries_b_before = _recursive_entries(run_b)
+        tracked = _track_temporary_directory(monkeypatch, tmp_path)
+
+        batch = load_t1_comparisons([run_a, run_b, run_c], repo_root=repo_root)
+
+        assert isinstance(batch, T1LoadedComparisonBatch)
+        assert benchmark_calls["n"] == 1
+        assert len(validate_calls) == 3
+        assert len(load_calls) == 3
+        assert len(prepared) == 3
+        assert len(compare_calls) == 3
+        assert validate_calls[0][1] == "dev"
+        assert validate_calls[0][2] is validate_calls[2][2]
+        assert compare_calls[0][0] is compare_calls[1][0]
+        assert compare_calls[0][0] is compare_calls[2][0]
+
+        assert prepared[1][0] == run_b / "dev.csv.zst"
+        assert prepared[1][1] == 2
+        assert len({index for _, index in prepared}) == 3
+
+        assert tuple(source.run_dir for source in batch.sources) == (
+            run_a.resolve(),
+            run_b.resolve(),
+            run_c.resolve(),
+        )
+        assert [source.C for source in batch.sources] == [0.1, 10.0, 5.0]
+        assert all(source.data_tag == _TAG for source in batch.sources)
+        assert batch.sources[1].predictions_path == run_b / "dev.csv.zst"
+
+        pair_keys = [
+            (pair.source_1.run_dir, pair.source_2.run_dir)
+            for pair in batch.comparisons
+        ]
+        assert pair_keys == [
+            (run_a.resolve(), run_b.resolve()),
+            (run_a.resolve(), run_c.resolve()),
+            (run_b.resolve(), run_c.resolve()),
+        ]
+        for pair in batch.comparisons:
+            assert pair.comparison.overall.word_count == 3
+
+        assert _recursive_entries(run_b) == entries_b_before
+        assert "path" in tracked
+        assert not tracked["path"].exists()
+        assert not list(repo_root.rglob("dev_input*.csv"))
+
+
+class TestBatchFailures:
+    def test_repeated_resolved_paths_fail_before_loading(
+        self, tmp_path, monkeypatch
+    ):
+        _forbid_corpus(monkeypatch)
+        run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES)
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
+        link = tmp_path / "run-a-link"
+        try:
+            link.symlink_to(run_a, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("Symlink creation is unavailable in this environment")
+
+        with pytest.raises(T1ComparisonInputError, match="duplicate"):
+            load_t1_comparisons([run_a, link], repo_root=tmp_path / "repo")
+        with pytest.raises(T1ComparisonInputError, match="duplicate"):
+            load_t1_comparisons([run_a, run_a], repo_root=tmp_path / "repo")
+
+    def test_fewer_than_two_distinct_inputs_rejected(self, tmp_path, monkeypatch):
+        _forbid_corpus(monkeypatch)
+        run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES)
+
+        with pytest.raises(T1ComparisonInputError, match="at least two"):
+            load_t1_comparisons([], repo_root=tmp_path / "repo")
+        with pytest.raises(T1ComparisonInputError, match="at least two"):
+            load_t1_comparisons([run_a], repo_root=tmp_path / "repo")
+
+    def test_incompatible_later_input_fails_before_corpus(
+        self, tmp_path, monkeypatch
+    ):
+        _forbid_corpus(monkeypatch)
+        run_a = _make_package(
+            tmp_path / "runs" / "run-a", INPUT1_BYTES, commit=_COMMIT
+        )
+        run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES)
+        run_c = _make_package(
+            tmp_path / "runs" / "run-c", INPUT1_BYTES, commit="e" * 40
+        )
+
+        with pytest.raises(T1ComparisonInputError, match="mismatched"):
+            load_t1_comparisons(
+                [run_a, run_b, run_c], repo_root=tmp_path / "repo"
+            )

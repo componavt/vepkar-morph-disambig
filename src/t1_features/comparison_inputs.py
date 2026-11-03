@@ -1,14 +1,14 @@
-"""File-input layer connecting two completed T1.1 result packages to the
+"""File-input layer connecting completed T1.1 result packages to the
 ranking-comparison core.
 
-Given two finished dev-run directories, this layer reads each package's
-``metrics.json`` and its single prediction file (``dev.csv`` or
-``dev.csv.zst``), checks that the two packages agree on their recorded data
+Given two or more finished dev-run directories, this layer reads each
+package's ``metrics.json`` and its single prediction file (``dev.csv`` or
+``dev.csv.zst``), checks that all packages agree on their recorded data
 identity, loads one common published benchmark from the local data checkout,
-validates and loads both prediction inputs, and returns the core's
-:class:`core.ranking_comparison.RankingComparison` result together with the
-original source metadata in input order.  It performs no fingerprint
-verification, computes no metrics, and writes no output.
+validates and loads each prediction input once, and returns every unordered
+comparison pair together with the original source metadata in input order.
+It performs no fingerprint verification, computes no metrics, and writes no
+output.
 """
 
 from __future__ import annotations
@@ -75,6 +75,14 @@ class T1LoadedComparison:
     source_1: T1ComparisonSource
     source_2: T1ComparisonSource
     comparison: RankingComparison
+
+
+@dataclass(frozen=True)
+class T1LoadedComparisonBatch:
+    """Every input source in input order and every unordered comparison pair."""
+
+    sources: tuple[T1ComparisonSource, ...]
+    comparisons: tuple[T1LoadedComparison, ...]
 
 
 def _check_tag_safe(tag: str, metrics_path: Path) -> None:
@@ -265,18 +273,43 @@ def _validate_and_load(
         ) from exc
 
 
-def load_t1_comparison(
-    run_dir_1: Path,
-    run_dir_2: Path,
+def _resolve_run_dirs(run_dirs: Iterable[Path]) -> tuple[Path, ...]:
+    """Resolve each input path and reject repeats or too few distinct inputs."""
+    materialized = tuple(Path(path) for path in run_dirs)
+    if len(materialized) < 2:
+        raise T1ComparisonInputError(
+            "at least two distinct T1 comparison input directories are required"
+        )
+    resolved = tuple(path.expanduser().resolve() for path in materialized)
+    seen: set[Path] = set()
+    for path in resolved:
+        if path in seen:
+            raise T1ComparisonInputError(
+                f"duplicate T1 comparison input directory: {path}"
+            )
+        seen.add(path)
+    return resolved
+
+
+def load_t1_comparisons(
+    run_dirs: Iterable[Path],
     *,
     repo_root: Path,
-) -> T1LoadedComparison:
-    """Compare two completed T1.1 dev packages on one common published benchmark."""
-    source_1 = _load_source(run_dir_1)
-    source_2 = _load_source(run_dir_2)
-    _check_metadata_compatible(source_1, source_2)
+) -> T1LoadedComparisonBatch:
+    """Compare every pair of N completed T1.1 dev packages on one benchmark.
 
-    common_tag = source_1.data_tag
+    All inputs must record the same data identity, which is established before
+    the expensive benchmark corpus is loaded.  The benchmark, the configuration
+    preflight, and each package's preparation/validation/loading happen exactly
+    once; only the core's metric computations run once per unordered pair.
+    """
+    resolved = _resolve_run_dirs(run_dirs)
+    sources = tuple(_load_source(path) for path in resolved)
+    for i in range(len(sources)):
+        for j in range(i + 1, len(sources)):
+            _check_metadata_compatible(sources[i], sources[j])
+
+    common_tag = sources[0].data_tag
     published_split_path: Path | None = None
     try:
         config = load_t1_config(repo_root)
@@ -305,15 +338,20 @@ def load_t1_comparison(
             f"{split_detail}: {exc}"
         ) from exc
 
+    prediction_paths = tuple(source.predictions_path for source in sources)
     application_error: T1ComparisonInputError | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="vepkar-t1-compare-") as temp:
             temp_dir = Path(temp)
             try:
-                readable_1 = _prepare_readable(source_1.predictions_path, temp_dir, 1)
-                readable_2 = _prepare_readable(source_2.predictions_path, temp_dir, 2)
-                rows_1 = _validate_and_load(readable_1, source_1, benchmark)
-                rows_2 = _validate_and_load(readable_2, source_2, benchmark)
+                readable = [
+                    _prepare_readable(source.predictions_path, temp_dir, index)
+                    for index, source in enumerate(sources, start=1)
+                ]
+                rows = [
+                    _validate_and_load(readable_path, source, benchmark)
+                    for readable_path, source in zip(readable, sources)
+                ]
 
                 dev_texts = {
                     (language, text_id)
@@ -326,17 +364,29 @@ def load_t1_comparison(
                     if (instance.language, instance.text_id) in dev_texts
                 ]
 
-                try:
-                    comparison = compare_rankings(dev_instances, rows_1, rows_2)
-                except MetricsInputError as exc:
-                    raise T1ComparisonInputError(
-                        f"comparison of T1 predictions {source_1.predictions_path} and "
-                        f"{source_2.predictions_path} failed: {exc}"
-                    ) from exc
-                result = T1LoadedComparison(
-                    source_1=source_1,
-                    source_2=source_2,
-                    comparison=comparison,
+                comparisons: list[T1LoadedComparison] = []
+                for i in range(len(sources)):
+                    for j in range(i + 1, len(sources)):
+                        try:
+                            comparison = compare_rankings(
+                                dev_instances, rows[i], rows[j]
+                            )
+                        except MetricsInputError as exc:
+                            raise T1ComparisonInputError(
+                                f"comparison of T1 predictions "
+                                f"{sources[i].predictions_path} and "
+                                f"{sources[j].predictions_path} failed: {exc}"
+                            ) from exc
+                        comparisons.append(
+                            T1LoadedComparison(
+                                source_1=sources[i],
+                                source_2=sources[j],
+                                comparison=comparison,
+                            )
+                        )
+                result = T1LoadedComparisonBatch(
+                    sources=sources,
+                    comparisons=tuple(comparisons),
                 )
             except T1ComparisonInputError as exc:
                 application_error = exc
@@ -345,11 +395,23 @@ def load_t1_comparison(
         if application_error is not None:
             application_error.add_note(
                 f"temporary workspace cleanup failed for "
-                f"{source_1.predictions_path} and {source_2.predictions_path}: {exc}"
+                f"{len(prediction_paths)} T1 comparison inputs: "
+                f"{', '.join(str(path) for path in prediction_paths)}: {exc}"
             )
             raise application_error
         raise T1ComparisonInputError(
             f"T1 comparison temporary workspace failed for "
-            f"{source_1.predictions_path} and {source_2.predictions_path}: {exc}"
+            f"{', '.join(str(path) for path in prediction_paths)}: {exc}"
         ) from exc
     return result
+
+
+def load_t1_comparison(
+    run_dir_1: Path,
+    run_dir_2: Path,
+    *,
+    repo_root: Path,
+) -> T1LoadedComparison:
+    """Compare two completed T1.1 dev packages on one common published benchmark."""
+    batch = load_t1_comparisons((run_dir_1, run_dir_2), repo_root=repo_root)
+    return batch.comparisons[0]

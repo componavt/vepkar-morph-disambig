@@ -294,24 +294,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     compare_t1_runs = commands.add_parser(
         "compare-t1-runs",
-        help="Compare two completed T1.1 dev runs and publish a comparative CSV",
+        help="Compare two or more completed T1.1 dev runs and publish comparative CSVs",
         allow_abbrev=False,
     )
     compare_t1_runs.add_argument(
         "--run-dirs",
         type=Path,
-        nargs=2,
+        nargs="+",
         required=True,
-        help="Two existing completed T1 run directories (dev split)",
-    )
-    compare_t1_runs.add_argument(
-        "--output",
-        type=Path,
-        default=None,
-        help=(
-            "Explicit comparative CSV destination "
-            "(default: automatic path under work/comparisons)"
-        ),
+        help="Two or more existing completed T1 run directories (dev split)",
     )
     return parser
 
