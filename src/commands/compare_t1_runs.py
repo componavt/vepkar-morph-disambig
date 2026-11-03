@@ -166,7 +166,9 @@ def _run_compare_t1_runs(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         for note in getattr(exc, "__notes__", ()):
             print(f"  {note}", file=sys.stderr)
-        if automatic and "already exists" in str(exc):
+        early_refusal = "destination already exists" in str(exc)
+        publication_collision = isinstance(exc.__cause__, FileExistsError)
+        if automatic and (early_refusal or publication_collision):
             print(
                 "hint: the automatic comparison name is reused by repeated "
                 "experiments; use --output to choose a different destination",

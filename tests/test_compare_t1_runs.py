@@ -3,6 +3,7 @@
 import csv
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -15,11 +16,8 @@ sys.path.insert(0, str(SRC))
 
 import benchmark_context  # noqa: E402
 from core.data import SUPPORTED_LANGUAGES, CorpusTables  # noqa: E402
-from core.metrics import RankingMetrics  # noqa: E402
-from core.ranking_comparison import (  # noqa: E402
-    ComparisonSummary,
-    RankingComparison,
-)
+from core.instances import Candidate, Instance  # noqa: E402
+from core.ranking_comparison import compare_rankings  # noqa: E402
 from t1_features.comparison_inputs import (  # noqa: E402
     T1ComparisonSource,
     T1LoadedComparison,
@@ -283,76 +281,49 @@ def _stub_source(run_dir, C):
     )
 
 
-def _metrics(word_count, top1, top3, top1_acc, mrr, top3_acc):
-    return RankingMetrics(
-        word_count=word_count,
-        top1_correct=top1,
-        top3_correct=top3,
-        top1_accuracy=top1_acc,
-        mrr=mrr,
-        top3_accuracy=top3_acc,
+@dataclass(frozen=True)
+class _PredRow:
+    word_id: int
+    wordform_id: int
+    gramset: str
+    rank: int
+
+
+def _occurrence(word_id, gold_index=1):
+    candidates = tuple(Candidate(10 + i, f"G{i}") for i in range(5))
+    return Instance(
+        language="krl",
+        word_id=word_id,
+        sentence_id=word_id,
+        text_id=word_id,
+        word=f"w{word_id}",
+        word_number=1,
+        sentence_xml="<s/>",
+        candidates=candidates,
+        gold_analysis=candidates[gold_index],
     )
 
 
-def _summary(word_count, **overrides):
-    base = dict(
-        word_count=word_count,
-        candidate_count=word_count * 2,
-        metrics_a=None,
-        metrics_b=None,
-        delta_top1=None,
-        delta_mrr=None,
-        delta_top3=None,
-        both_correct=0,
-        corrected=0,
-        regressed=0,
-        both_wrong_same=0,
-        both_wrong_changed=0,
-        top1_changed=0,
-        gold_rank_improved=0,
-        gold_rank_worsened=0,
-        gold_rank_unchanged=word_count,
-    )
-    base.update(overrides)
-    return ComparisonSummary(**base)
+def _pred_rows(word_id, ranks):
+    return [
+        _PredRow(word_id, 10 + i, f"G{i}", rank) for i, rank in enumerate(ranks)
+    ]
 
 
 def _negative_delta_comparison():
-    a = _metrics(5, 4, 5, 0.8, 0.9, 1.0)
-    b = _metrics(5, 5, 4, 0.9, 0.65, 0.95)
-    krl = _summary(
-        5,
-        metrics_a=a,
-        metrics_b=b,
-        delta_top1=0.1,
-        delta_mrr=-0.25,
-        delta_top3=-0.05,
-        corrected=2,
-        regressed=1,
-        both_correct=2,
-        top1_changed=1,
+    """A/B gold ranks 2,2,2 vs 1,5,5: B wins Top-1 but loses MRR and Top-3."""
+    instances = [_occurrence(1), _occurrence(2), _occurrence(3)]
+    a_rows = (
+        _pred_rows(1, [1, 2, 3, 4, 5])
+        + _pred_rows(2, [1, 2, 3, 4, 5])
+        + _pred_rows(3, [1, 2, 3, 4, 5])
     )
-    empty = _summary(0)
-    overall = _summary(
-        5,
-        metrics_a=a,
-        metrics_b=b,
-        delta_top1=0.1,
-        delta_mrr=-0.25,
-        delta_top3=-0.05,
-        corrected=2,
-        regressed=1,
-        both_correct=2,
-        top1_changed=1,
+    b_rows = (
+        _pred_rows(1, [2, 1, 3, 4, 5])
+        + _pred_rows(2, [1, 5, 2, 3, 4])
+        + _pred_rows(3, [1, 5, 2, 3, 4])
     )
-    return RankingComparison(
-        a_input_index=1,
-        b_input_index=2,
-        selection_reason="top1",
-        rows=(),
-        overall=overall,
-        by_language={"krl": krl, "lud": empty, "olo": empty, "vep": empty},
-    )
+    return compare_rankings(instances, a_rows, b_rows)
 
 
 def _stub_loaded(comparison, c1=1.0, c2=0.5):
@@ -519,13 +490,15 @@ class TestCliSuccess:
         assert added == {"work/comparisons/fixture-tag/t1.1-C1__vs__t1.1-C0.1.csv"}
         assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
 
-    def test_reversal_keeps_input_order_and_path(self, tmp_path, monkeypatch, capsys):
+    def test_reversal_preserves_ab_roles_path_and_csv(
+        self, tmp_path, monkeypatch, capsys
+    ):
         cli, repo_root = _cli_setup(tmp_path, monkeypatch)
         run_a = _make_package(tmp_path / "runs" / "run-a", INPUT1_BYTES, C=1.0)
         run_b = _make_package(tmp_path / "runs" / "run-b", INPUT2_BYTES, C=0.1)
 
         status = cli.main(
-            ["compare-t1-runs", "--run-dirs", str(run_b), str(run_a)]
+            ["compare-t1-runs", "--run-dirs", str(run_a), str(run_b)]
         )
         captured = capsys.readouterr()
         assert status == 0, captured.err
@@ -537,10 +510,26 @@ class TestCliSuccess:
             / "work"
             / "comparisons"
             / _TAG
-            / "t1.1-C0.1__vs__t1.1-C1.csv"
+            / "t1.1-C1__vs__t1.1-C0.1.csv"
         )
         assert expected.is_file()
         assert f"Comparison CSV: {expected}" in captured.out
+        first_bytes = expected.read_bytes()
+
+        expected.unlink()
+        assert not expected.exists()
+
+        status = cli.main(
+            ["compare-t1-runs", "--run-dirs", str(run_b), str(run_a)]
+        )
+        captured = capsys.readouterr()
+        assert status == 0, captured.err
+        assert f"A: {run_a.resolve()} (t1.1, C=1)" in captured.out
+        assert f"B: {run_b.resolve()} (t1.1, C=0.1)" in captured.out
+        assert "B selected by Top-1" in captured.out
+        assert f"Comparison CSV: {expected}" in captured.out
+        assert expected.is_file()
+        assert expected.read_bytes() == first_bytes
 
     def test_tie_preserves_input_order_and_equal_c_path(
         self, tmp_path, monkeypatch, capsys
@@ -611,12 +600,13 @@ class TestCliSuccess:
         out = captured.out
         assert "T1 comparison: OK" in out
         assert "B selected by Top-1" in out
-        assert "Top-1 accuracy 0.8000  0.9000  +0.1000" in out
-        assert "MRR            0.9000  0.6500  -0.2500" in out
-        assert "Top-3 accuracy 1.0000  0.9500  -0.0500" in out
+        assert "Top-1 accuracy 0.0000  0.3333  +0.3333" in out
+        assert "MRR            0.5000  0.4667  -0.0333" in out
+        assert "Top-3 accuracy 1.0000  0.3333  -0.6667" in out
         assert "N/A" in out
-        assert "-0.2500" in out
-        assert "+0.1000" in out
+        assert "-0.0333" in out
+        assert "+0.3333" in out
+        assert "-0.6667" in out
         expected = (
             repo_root
             / "work"
@@ -769,6 +759,30 @@ class TestCliFailures:
         assert not expected.exists()
         assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
         assert "T1 comparison: OK" not in captured.out
+
+    def test_publication_collision_hint_on_file_exists_error(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        cli, repo_root = _cli_setup(tmp_path, monkeypatch)
+        run_a, run_b = _cli_packages(tmp_path)
+
+        def file_exists_link(src, dst):
+            raise FileExistsError("destination already exists during link")
+
+        monkeypatch.setattr(
+            "t1_features.comparison_output.os.link", file_exists_link
+        )
+
+        status = cli.main(
+            ["compare-t1-runs", "--run-dirs", str(run_a), str(run_b)]
+        )
+        captured = capsys.readouterr()
+        assert status == 1
+        assert "error: cannot write comparison CSV" in captured.err
+        assert "publish" in captured.err
+        assert "--output" in captured.err
+        assert "T1 comparison: OK" not in captured.out
+        assert not list(repo_root.rglob(".vepkar-t1-comparison-*.tmp"))
 
     def test_published_cleanup_failure_preserves_readable_csv(
         self, tmp_path, monkeypatch, capsys

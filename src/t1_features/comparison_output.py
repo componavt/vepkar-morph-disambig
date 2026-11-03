@@ -79,18 +79,24 @@ def default_comparison_path(
 ) -> Path:
     """Return the automatic comparative CSV path for a loaded comparison.
 
-    The path is derived from the globally assigned input-order source metadata
-    (``source_1``/``source_2``), never from comparison roles or directory
-    names, so reversing the two input directories reverses the path labels
-    and the core's winner orientation is irrelevant.
+    The path labels follow the comparison's globally assigned A/B roles:
+    ``loaded.comparison.a_input_index`` and ``b_input_index`` map the two
+    roles back to the input sources, whose metadata supplies ``method`` and
+    ``C``.  Source directory names are never parsed.  Because the winner is
+    always B, reversing the two input directories preserves the name whenever
+    a winner is determined; on a metric tie the core's input-order assignment
+    is preserved.
     """
     tag = loaded.source_1.data_tag
+    sources = (loaded.source_1, loaded.source_2)
+    a_source = sources[loaded.comparison.a_input_index - 1]
+    b_source = sources[loaded.comparison.b_input_index - 1]
     return (
         repo_root
         / "work"
         / "comparisons"
         / tag
-        / f"{_short_label(loaded.source_1)}__vs__{_short_label(loaded.source_2)}.csv"
+        / f"{_short_label(a_source)}__vs__{_short_label(b_source)}.csv"
     )
 
 

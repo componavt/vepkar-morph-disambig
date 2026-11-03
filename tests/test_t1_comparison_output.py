@@ -95,7 +95,23 @@ class TestCsv:
         write_comparison_csv(iter(ROWS), out)
 
         parsed = _read_csv(out)
-        assert parsed[0] == COMPARISON_HEADER
+        assert parsed[0] == [
+            "language",
+            "word_id",
+            "word",
+            "candidate_count",
+            "gold_wordform_id",
+            "gold_gramset",
+            "a_top1_wordform_id",
+            "a_top1_gramset",
+            "b_top1_wordform_id",
+            "b_top1_gramset",
+            "a_gold_rank",
+            "b_gold_rank",
+            "top1_changed",
+            "outcome",
+            "delta_rr",
+        ]
         assert len(parsed) - 1 == len(ROWS)
 
         raw = out.read_text(encoding="utf-8")
@@ -154,8 +170,16 @@ class TestAutomaticPath:
             split_sha256="s",
         )
 
-    def _loaded(self, s1, s2):
-        return T1LoadedComparison(s1, s2, SimpleNamespace(rows=()))
+    def _loaded(self, s1, s2, a_input_index=1, b_input_index=2):
+        return T1LoadedComparison(
+            s1,
+            s2,
+            SimpleNamespace(
+                rows=(),
+                a_input_index=a_input_index,
+                b_input_index=b_input_index,
+            ),
+        )
 
     def test_path_from_metadata_not_folder_names(self, tmp_path):
         s1 = self._source("somewhere/run-x", C=1.0)
@@ -172,17 +196,23 @@ class TestAutomaticPath:
             / "t1.1-C1__vs__t1.1-C0.1.csv"
         )
 
-    def test_path_uses_input_order_not_winner(self, tmp_path):
+    def test_assigned_ab_roles_determine_name(self, tmp_path):
         winner_first = default_comparison_path(
             self._loaded(
-                self._source("winner", C=0.1), self._source("loser", C=1.0)
+                self._source("winner", C=0.1),
+                self._source("loser", C=1.0),
+                a_input_index=2,
+                b_input_index=1,
             ),
             repo_root=tmp_path / "repo",
         )
-        assert winner_first.name == "t1.1-C0.1__vs__t1.1-C1.csv"
+        assert winner_first.name == "t1.1-C1__vs__t1.1-C0.1.csv"
         loser_first = default_comparison_path(
             self._loaded(
-                self._source("loser", C=1.0), self._source("winner", C=0.1)
+                self._source("loser", C=1.0),
+                self._source("winner", C=0.1),
+                a_input_index=1,
+                b_input_index=2,
             ),
             repo_root=tmp_path / "repo",
         )
