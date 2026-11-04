@@ -157,3 +157,10 @@ version recorded in `metrics.json`, for example `v2026.09`.
 The package path is printed in the `Milestone directory:` line.
 The source run remains unchanged.
 An existing result directory is not overwritten.
+
+### Comparing runs
+
+`compare-t1-runs` compares existing dev predictions from two or more runs,
+reports changes in quality, and saves per-occurrence comparisons for every pair.
+
+[Comparison workflow, CSV fields, and saved results](results/comparisons/README.md).
