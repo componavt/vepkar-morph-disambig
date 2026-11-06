@@ -118,4 +118,6 @@ results/comparisons/<tag>/*.csv.zst
 Working CSV files remain local. The comparison command does not move them
 into `results/` or add files to Git.
 
+[Comparisons for v2026.11](v2026.11/README.md).
+
 [Comparisons for v2026.09](v2026.09/README.md).

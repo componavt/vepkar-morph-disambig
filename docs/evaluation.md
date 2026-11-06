@@ -14,7 +14,7 @@ activated. Obtain the source data by following the
 [instructions in the README](../README.md#work-with-data).
 
 For evaluation, use the published split
-`data/derived/splits_v2026.09.csv`.
+`data/derived/splits_v2026.11.csv`.
 Its structure and generation are described in the
 [split section](../data/derived/README.md#traindevtest-split).
 

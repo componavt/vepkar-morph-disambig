@@ -25,7 +25,7 @@ from core.data import (  # noqa: E402
 TEXT_COLS = ["text_id", "corpus_id", "dialect_code", "genre_id", "year_recorded"]
 SENT_COLS = ["sentence_id", "text_id", "sentence_xml", "sentence_ru"]
 WORD_COLS = ["word_id", "sentence_id", "word_number", "word"]
-CAND_COLS = ["word_id", "wordform_id", "gramset", "relevance"]
+CAND_COLS = ["word_id", "wordform_id", "gramset_id", "gramset", "relevance"]
 
 GOOD_TEXTS = [
     (1, "3", "krl-new", "", ""),
@@ -56,8 +56,18 @@ GOOD_CANDIDATES = [
 ]
 
 
+def _with_gramset_id(row: tuple) -> tuple:
+    """Let fixtures omit ``gramset_id``: 0 for an empty gramset, otherwise 1."""
+    if len(row) == len(CAND_COLS):
+        return row
+    word_id, wordform_id, gramset, relevance = row
+    return (word_id, wordform_id, 1 if gramset else 0, gramset, relevance)
+
+
 def write_zst_csv(path: Path, columns: list[str], rows: list[tuple]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if columns == CAND_COLS:
+        rows = [_with_gramset_id(row) for row in rows]
     frame = pd.DataFrame.from_records(rows, columns=columns)
     csv = frame.to_csv(index=False, lineterminator="\n")
     cctx = zstd.ZstdCompressor(level=3)
@@ -122,6 +132,7 @@ def test_read_all_four_tables_with_typed_schema(tmp_path):
     assert list(candidates.columns) == CAND_COLS
     assert str(candidates["word_id"].dtype) == "Int64"
     assert str(candidates["wordform_id"].dtype) == "Int64"
+    assert str(candidates["gramset_id"].dtype) == "Int64"
     assert str(candidates["gramset"].dtype) == "string"
     assert str(candidates["relevance"].dtype) == "Int64"
     assert candidates["relevance"].tolist() == [2, 1, 2, 1, 2, 2, 0]
@@ -236,6 +247,36 @@ def test_empty_gramset_retained_as_empty_string(tmp_path):
     candidates = read_candidates("krl", tmp_path)
     assert candidates["gramset"].iloc[0] == ""
     assert str(candidates["gramset"].dtype) == "string"
+
+
+def test_gramset_id_zero_and_sql_null_accepted(tmp_path):
+    build_fixture(tmp_path)
+    rows = [(100, 9001, 0, "", 1), (100, 9002, "\\N", "", 1), (100, 9003, 3, "SG+GEN", 2)]
+    write_zst_csv(tmp_path / "corpus" / "candidate_analyses_krl.csv.zst", CAND_COLS, rows)
+    ids = read_candidates("krl", tmp_path)["gramset_id"]
+    assert ids.iloc[0] == 0
+    assert pd.isna(ids.iloc[1])
+    assert ids.iloc[2] == 3
+
+
+@pytest.mark.parametrize("value", ["", "-1", "1.5", "x", "\\n"])
+def test_invalid_gramset_id_rejected(tmp_path, value):
+    build_fixture(tmp_path)
+    rows = [(100, 9001, value, "SG+GEN", 2)]
+    write_zst_csv(tmp_path / "corpus" / "candidate_analyses_krl.csv.zst", CAND_COLS, rows)
+    with pytest.raises(DataError, match="gramset_id"):
+        read_candidates("krl", tmp_path)
+
+
+def test_previous_candidate_header_rejected(tmp_path):
+    build_fixture(tmp_path)
+    write_zst_csv(
+        tmp_path / "corpus" / "candidate_analyses_krl.csv.zst",
+        ["word_id", "wordform_id", "gramset", "relevance"],
+        [(100, 9001, "SG+GEN", 2)],
+    )
+    with pytest.raises(DataError, match="Schema mismatch"):
+        read_candidates("krl", tmp_path)
 
 
 def test_unsupported_language_rejected(tmp_path):

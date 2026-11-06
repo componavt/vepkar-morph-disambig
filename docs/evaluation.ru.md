@@ -11,7 +11,7 @@
 [инструкции в README](../README.ru.md#работа-с-данными).
 
 Для оценки используйте опубликованное разбиение
-`data/derived/splits_v2026.09.csv`.
+`data/derived/splits_v2026.11.csv`.
 Его устройство и способ подготовки описаны в
 [разделе о разбиении](../data/derived/README.ru.md#разбиение-traindevtest).
 

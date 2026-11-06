@@ -22,6 +22,11 @@ If a candidate is unsuitable, the entire word occurrence is excluded
 rather than reducing its list of alternatives. The source data
 are not modified.
 
+> **Unannotated words.** A word with a candidate whose `gramset_id = 0` is treated
+> as unannotated and is excluded from the evaluation set as a whole, even if it has
+> other candidates. `gramset_id = 7` is handled the same way: this number is absent
+> from the gramset reference table. The `gramset` field of such candidates is empty.
+
 ## Building the evaluation set and manual review
 
 The following command builds the strict set of word occurrences
@@ -37,8 +42,8 @@ Run the command from the repository root after obtaining the source data.
 
 ## Train/dev/test split
 
-For experiments with version `v2026.09` of `dictorpus-data`,
-use the published `splits_v2026.09.csv`. There is no need to
+For experiments with version `v2026.11` of `dictorpus-data`,
+use the published `splits_v2026.11.csv`. There is no need to
 regenerate it before training or evaluation.
 
 To generate a split, run:
@@ -48,6 +53,18 @@ python src/cli.py make-splits
 ```
 
 The source-data version is included in the filename: `splits_<tag>.csv`.
+
+The command makes 200 random attempts for each language. Among attempts whose
+total deviation from the 80/10/10 shares is at most 1%, it selects the one with
+the larger of the smaller `Neff` values of the `dev` and `test` parts:
+
+```text
+Neff = (Σ wᵢ)² / Σ wᵢ²,   wᵢ — the candidate rows of text i
+```
+
+`Neff` is the effective number of texts: the smaller it is, the more a part depends
+on a few large texts. If no attempt qualifies, the smallest deviation wins. Model
+results are not used in this choice.
 
 The file has three columns:
 

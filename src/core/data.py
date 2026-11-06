@@ -21,7 +21,7 @@ DEFAULT_DATA_DIR = PROJECT_ROOT / "data" / "dictorpus-data"
 _TEXT_COLUMNS = ("text_id", "corpus_id", "dialect_code", "genre_id", "year_recorded")
 _SENTENCE_COLUMNS = ("sentence_id", "text_id", "sentence_xml", "sentence_ru")
 _WORD_COLUMNS = ("word_id", "sentence_id", "word_number", "word")
-_CANDIDATE_COLUMNS = ("word_id", "wordform_id", "gramset", "relevance")
+_CANDIDATE_COLUMNS = ("word_id", "wordform_id", "gramset_id", "gramset", "relevance")
 
 _TEXT_RESULT_COLUMNS = ("text_id", "corpus_ids", "dialect_code", "genre_ids", "year_recorded")
 
@@ -35,6 +35,8 @@ _REQUIRED_POSITIVE_IDS = {
 _POSITIVE_INT = r"[1-9][0-9]*"
 _META_PATTERN = rf"{_POSITIVE_INT}(\|{_POSITIVE_INT})*"
 _WORD_NUMBER_PATTERN = r"0|[1-9][0-9]*"
+_GRAMSET_ID_PATTERN = r"0|[1-9][0-9]*"
+_SQL_NULL = r"\N"
 
 
 def _check_zstd_support() -> None:
@@ -82,7 +84,7 @@ def require_local_corpus(data_dir: Path) -> Path:
             raise DataError(
                 f"Local dictorpus-data checkout is missing: {checkout}\n"
                 "When you are ready to fetch it, run:\n"
-                "  python src/cli.py fetch-data v2026.09"
+                "  python src/cli.py fetch-data v2026.11"
             )
         raise DataError(
             f"Local dictorpus-data checkout is missing: {checkout}\n"
@@ -215,6 +217,22 @@ def read_words(lang: str, data_dir: Path | None = None) -> pd.DataFrame:
     return frame[list(_WORD_COLUMNS)]
 
 
+def _parse_gramset_id(frame: pd.DataFrame, path: Path) -> pd.Series:
+    """Parse the source reference: a non-negative integer, or ``\\N`` for SQL NULL.
+
+    Zero is a valid source value; it marks a candidate without a grammatical set.
+    """
+    raw = frame["gramset_id"].astype(str)
+    missing = raw == _SQL_NULL
+    bad = ~missing & ~raw.str.fullmatch(_GRAMSET_ID_PATTERN)
+    if bad.any():
+        examples = raw[bad].unique()[:5].tolist()
+        _fail_column(path, "gramset_id", int(bad.sum()), examples)
+    ids = pd.Series(pd.NA, index=frame.index, dtype="Int64")
+    ids[~missing] = raw[~missing].astype("Int64")
+    return ids
+
+
 def read_candidates(lang: str, data_dir: Path | None = None) -> pd.DataFrame:
     """Read ``candidate_analyses_<lang>.csv.zst`` into a typed table."""
     frame = _read_raw("candidate_analyses", lang, data_dir)
@@ -226,6 +244,7 @@ def read_candidates(lang: str, data_dir: Path | None = None) -> pd.DataFrame:
         examples = raw[bad].unique()[:5].tolist()
         _fail_column(path, "relevance", int(bad.sum()), examples)
     frame["relevance"] = raw.astype("Int64")
+    frame["gramset_id"] = _parse_gramset_id(frame, path)
     frame["gramset"] = frame["gramset"].astype("string")
     return frame[list(_CANDIDATE_COLUMNS)]
 

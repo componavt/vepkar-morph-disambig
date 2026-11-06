@@ -136,7 +136,7 @@ def test_missing_default_checkout_offers_fetch_command(tmp_path, monkeypatch, ca
     assert status == 1
     assert "dictorpus-data" in captured.err
     assert str(missing) in captured.err
-    assert "fetch-data v2026.09" in captured.err
+    assert "fetch-data v2026.11" in captured.err
     assert "Traceback" not in captured.err
     assert "  vep  OK" not in captured.err
     assert "BENCHMARK" not in captured.out
@@ -161,11 +161,11 @@ def test_fetch_data_downloaded_success(tmp_path, monkeypatch, capsys):
         return True
 
     monkeypatch.setattr(fetch_pkg, "fetch_data", fake_fetch)
-    status = cli.main(["fetch-data", "v2026.09"])
+    status = cli.main(["fetch-data", "v2026.11"])
     captured = capsys.readouterr()
     assert status == 0
     assert captured.out == (
-        "Downloaded: dictorpus-data (v2026.09) in data/dictorpus-data/\n"
+        "Downloaded: dictorpus-data (v2026.11) in data/dictorpus-data/\n"
     )
     assert captured.err == ""
 
@@ -178,11 +178,11 @@ def test_fetch_data_already_present_success(tmp_path, monkeypatch, capsys):
         return False
 
     monkeypatch.setattr(fetch_pkg, "fetch_data", fake_fetch)
-    status = cli.main(["fetch-data", "v2026.09"])
+    status = cli.main(["fetch-data", "v2026.11"])
     captured = capsys.readouterr()
     assert status == 0
     assert captured.out == (
-        "Already present: dictorpus-data (v2026.09) in data/dictorpus-data/\n"
+        "Already present: dictorpus-data (v2026.11) in data/dictorpus-data/\n"
     )
     assert captured.err == ""
 
@@ -196,7 +196,7 @@ def test_fetch_data_fetch_error_exits_one(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setattr(fetch_pkg, "fetch_data", failing_fetch)
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(["fetch-data", "v2026.09"])
+        cli.main(["fetch-data", "v2026.11"])
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert captured.out == ""

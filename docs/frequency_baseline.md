@@ -1,6 +1,6 @@
 # Frequency baseline
 
-Results from the run on 1 October 2026.
+Results from the run on 1 October 2026, on `v2026.09` data.
 
 `score` is the number of expert selections of the pair
 `(wordform_id, gramset)` among strict `train` instances.

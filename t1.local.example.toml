@@ -15,4 +15,4 @@
 data_dir = "data/dictorpus-data"
 runs_dir = "work/runs"
 # Optional explicit split:
-# split_file = "data/derived/splits_v2026.09.csv"
+# split_file = "data/derived/splits_v2026.11.csv"

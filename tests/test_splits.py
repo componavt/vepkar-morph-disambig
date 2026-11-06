@@ -19,6 +19,7 @@ from core.splits import (  # noqa: E402
     SplitError,
     TextWeight,
     assign_texts,
+    effective_text_count,
     build_split_rows,
     compute_text_weights,
     design_text_weights,
@@ -140,6 +141,23 @@ def test_unattainable_reports_actual_proportions():
     assert rows["train"] + rows["dev"] + rows["test"] == 100
     assert rows != {"train": 80, "dev": 10, "test": 10}
     assert rows["train"] == 100
+
+
+def test_effective_text_count():
+    equal = design_text_weights([("krl", text_id, 1, 10) for text_id in range(1, 5)])
+    assert effective_text_count(equal) == pytest.approx(4.0)
+    dominated = design_text_weights([("krl", 1, 1, 90), ("krl", 2, 1, 10)])
+    assert effective_text_count(dominated) == pytest.approx(10000 / 8200)
+    assert effective_text_count(()) == 0.0
+
+
+def test_large_text_stays_out_of_dev_and_test_when_small_texts_fit():
+    rows = [("krl", 1, 50, 100)] + [("krl", i, 5, 10) for i in range(2, 92)]
+    assignment = assign_texts(design_text_weights(rows))
+    assert not any(w.text_id == 1 for w in assignment["dev"])
+    assert not any(w.text_id == 1 for w in assignment["test"])
+    assert effective_text_count(assignment["dev"]) == pytest.approx(10.0)
+    assert effective_text_count(assignment["test"]) == pytest.approx(10.0)
 
 
 def test_every_split_nonempty_for_sufficient_fixture():
@@ -330,7 +348,7 @@ def _write_zst_corpus(root: Path, lang: str, rows) -> None:
 TEXT_COLS = ["text_id", "corpus_id", "dialect_code", "genre_id", "year_recorded"]
 SENT_COLS = ["sentence_id", "text_id", "sentence_xml", "sentence_ru"]
 WORD_COLS = ["word_id", "sentence_id", "word_number", "word"]
-CAND_COLS = ["word_id", "wordform_id", "gramset", "relevance"]
+CAND_COLS = ["word_id", "wordform_id", "gramset_id", "gramset", "relevance"]
 
 
 def build_language_fixture(root: Path, lang: str, offset: int) -> None:
@@ -349,8 +367,8 @@ def build_language_fixture(root: Path, lang: str, offset: int) -> None:
                 (sentence_id, text_id, f'<s id="{sentence_id}"><w id="{word_id}">sana</w></s>', "")
             )
             words.append((word_id, sentence_id, 1, "sana"))
-            candidates.append((word_id, wordform, "N+SG+NOM", 2))
-            candidates.append((word_id, wordform + 1, "N+SG+GEN", 1))
+            candidates.append((word_id, wordform, 1, "N+SG+NOM", 2))
+            candidates.append((word_id, wordform + 1, 2, "N+SG+GEN", 1))
             word_id += 1
             wordform += 2
             sentence_id += 1

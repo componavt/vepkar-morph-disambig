@@ -29,7 +29,7 @@ python -m pytest -q
 Fetch the source data from [dictorpus-data](https://github.com/componavt/dictorpus-data/):
 
 ```bash
-python src/cli.py fetch-data v2026.09
+python src/cli.py fetch-data v2026.11
 ```
 
 Inspect the corpus:
@@ -38,9 +38,14 @@ Inspect the corpus:
 python src/cli.py inspect-data krl
 ```
 
-For experiments with `v2026.09`, use the published split file
-`data/derived/splits_v2026.09.csv`. There is no need to regenerate
-the split before running a model.
+For experiments with `v2026.11`, use the published split file
+`data/derived/splits_v2026.11.csv`. There is no need to regenerate
+the split before running a model. The code reads only this release's format.
+
+> **Unannotated words.** A word with a candidate whose `gramset_id = 0` is treated
+> as unannotated and is excluded from the evaluation set as a whole, even if it has
+> other candidates. `gramset_id = 7` is handled the same way: this number is absent
+> from the gramset reference table. The `gramset` field of such candidates is empty.
 
 Language codes: `vep` — the Veps language; `krl`, `olo`, and `lud` —
 the Karelian Proper, Livvi, and Ludic dialects of the Karelian language,
@@ -152,7 +157,7 @@ results/milestones/<tag>/<run>/
 ```
 
 Here, `<run>` is the run directory name, and `<tag>` is the source-data
-version recorded in `metrics.json`, for example `v2026.09`.
+version recorded in `metrics.json`, for example `v2026.11`.
 
 The package path is printed in the `Milestone directory:` line.
 The source run remains unchanged.

@@ -4,7 +4,8 @@ Accepted step-7 instances are grouped by ``(language, text_id)``; each whole
 text is then assigned to exactly one split per language, targeting
 80/10/10 shares of the accepted candidate rows.  Assignments are computed by a
 simple seeded greedy with deterministic tie-breaking and a fixed number of
-restarts; the best candidate-row fit is kept.
+restarts.  Among restarts that fit the shares closely, the one whose dev and
+test parts depend least on a few large texts is kept.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ SPLIT_NAMES = ("train", "dev", "test")
 TARGET_SHARES = {"train": 0.80, "dev": 0.10, "test": 0.10}
 SPLIT_SEED = 20260928
 SPLIT_ATTEMPTS = 200
+MAX_ACCEPTED_DEVIATION = 0.01
 
 SPLIT_CSV_PREFIX = "splits"
 SPLIT_CSV_HEADER = ("language", "text_id", "split")
@@ -115,8 +117,24 @@ def _ensure_nonempty(
     return bins
 
 
+def effective_text_count(weights: Iterable[TextWeight]) -> float:
+    """Return ``(sum w)^2 / sum w^2`` over candidate-row weights ``w``.
+
+    Equals the text count for equal texts and approaches 1 when one text
+    dominates.  An empty part yields 0.
+    """
+    rows = [weight.candidate_row_count for weight in weights]
+    total_squares = sum(count * count for count in rows)
+    return sum(rows) ** 2 / total_squares if total_squares else 0.0
+
+
 def assign_texts(weights: tuple[TextWeight, ...]) -> dict[str, tuple[TextWeight, ...]]:
-    """Assign whole texts to train/dev/test, minimizing candidate-row deviation.
+    """Assign whole texts to train/dev/test by candidate-row shares.
+
+    Restarts whose total deviation from the shares is at most
+    ``MAX_ACCEPTED_DEVIATION`` of all rows are compared by the smaller effective
+    text count of dev and test, then by deviation; if no restart qualifies, the
+    smallest deviation wins.  Only text sizes are used, never model results.
 
     Deterministic: fixed seed, fixed restarts, and stable tie-breaking.  The
     80/10/10 shares are a target, not an exact guarantee.
@@ -126,7 +144,7 @@ def assign_texts(weights: tuple[TextWeight, ...]) -> dict[str, tuple[TextWeight,
         raise SplitError("Cannot split a language with no accepted candidate rows")
     targets = {part: total * share for part, share in TARGET_SHARES.items()}
     best: dict[str, tuple[TextWeight, ...]] | None = None
-    best_score: float | None = None
+    best_rank: tuple[int, float, float] | None = None
     for attempt in range(SPLIT_ATTEMPTS):
         order = list(weights)
         random.Random(SPLIT_SEED + attempt).shuffle(order)
@@ -142,15 +160,22 @@ def assign_texts(weights: tuple[TextWeight, ...]) -> dict[str, tuple[TextWeight,
             )
             bins[chosen].append(weight)
         _ensure_nonempty(bins)
-        score = sum(
+        deviation = sum(
             abs(
                 sum(entry.candidate_row_count for entry in bins[part])
                 - targets[part]
             )
             for part in SPLIT_NAMES
+        ) / total
+        accepted = deviation <= MAX_ACCEPTED_DEVIATION
+        balance = (
+            min(effective_text_count(bins["dev"]), effective_text_count(bins["test"]))
+            if accepted
+            else 0.0
         )
-        if best_score is None or score < best_score:
-            best_score = score
+        rank = (int(accepted), balance, -deviation)
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
             best = {
                 part: tuple(
                     sorted(bins[part], key=lambda weight: weight.text_id)
