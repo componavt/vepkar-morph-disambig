@@ -257,15 +257,17 @@ class TestT1Loading:
 
         monkeypatch.setattr(benchmark_context, "read_corpus_tables", spy)
         with pytest.raises(ValueError) as exc:
-            load_t1_inputs(tmp_path, "tag", split="test")
+            load_t1_inputs(tmp_path, "tag", split="holdout")
         message = str(exc.value)
-        assert "test" in message and "train" in message and "dev" in message
+        assert "holdout" in message and "train" in message and "dev" in message
+        assert "test" in message
 
     @pytest.mark.parametrize(
         ("split", "targets", "context"),
         [
             ("train", TRAIN_TARGETS, expected_train_context()),
             ("dev", DEV_TARGETS, expected_dev_context()),
+            ("test", [(lang, WORD_BASE[lang] + 8, 3) for lang in sorted(SUPPORTED_LANGUAGES)], None),
         ],
     )
     def test_exact_targets_and_full_context(
@@ -276,8 +278,11 @@ class TestT1Loading:
             tmp_path, "tag", split=split, split_file_override=split_path
         )
         assert [(inst.language, inst.word_id, inst.text_id) for inst in inputs.instances] == targets
-        assert all(inst.text_id != 3 for inst in inputs.instances)
-        assert inputs.context_words == context
+        if context is not None:
+            assert all(inst.text_id != 3 for inst in inputs.instances)
+            assert inputs.context_words == context
+        else:
+            assert {item.sentence_id for item in inputs.context_words} == {30}
 
     def test_literal_preservation_and_deterministic_order(self, corpus, tmp_path):
         tables, calls, split_path = corpus

@@ -1,0 +1,80 @@
+{
+  "protocol": {
+    "goal": "G1",
+    "data_tag": "v2026.11",
+    "data_commit": "85af0d701c5e061a58c2b9d0c7745bb9f096d22e",
+    "split_sha256": "854985d45147419b5fb71ade4f0f668b8405b7976db2effd2abb6d4ca146f6ca",
+    "split": "test",
+    "bootstrap_unit": "(language, text_id)",
+    "bootstrap_samples": 1000,
+    "bootstrap_seed": 20261109,
+    "ci": "percentile 95%"
+  },
+  "overall": {
+    "point": {
+      "frequency_baseline": {
+        "word_count": 2540,
+        "top1_accuracy": 0.6874015748031496,
+        "mrr": 0.8351946631671043,
+        "top3_accuracy": 0.9905511811023622
+      },
+      "10": {
+        "word_count": 2540,
+        "top1_accuracy": 0.8480314960629921,
+        "mrr": 0.920390419947507,
+        "top3_accuracy": 0.9976377952755906
+      }
+    },
+    "intervals": {
+      "frequency_baseline": {
+        "top1_accuracy": [
+          0.6519095784208491,
+          0.7184977523060927
+        ],
+        "mrr": [
+          0.8162588061266008,
+          0.8516477110574611
+        ],
+        "top3_accuracy": [
+          0.9862122310822845,
+          0.9941360765254471
+        ]
+      },
+      "10": {
+        "top1_accuracy": [
+          0.8218637342611,
+          0.8720821892570403
+        ],
+        "mrr": [
+          0.9069025816925012,
+          0.9324745517524969
+        ],
+        "top3_accuracy": [
+          0.9954944286840839,
+          0.9995549621717846
+        ]
+      }
+    },
+    "paired_differences_vs_previous_model": {
+      "10": {
+        "top1_accuracy": [
+          0.13302158709754774,
+          0.1962558912409231
+        ],
+        "mrr": [
+          0.07052193281029596,
+          0.10416664125480286
+        ],
+        "top3_accuracy": [
+          0.003441509033900875,
+          0.011364126344507607
+        ]
+      }
+    },
+    "bootstrap_text_count": 148
+  },
+  "models": [
+    "frequency_baseline",
+    "10"
+  ]
+}

@@ -24,6 +24,7 @@ from t1_features.prediction_io import (  # noqa: E402
     T1PredictionPublishedCleanupError,
     T1PredictionWriteError,
     write_dev_predictions,
+    write_split_predictions,
 )
 
 SPLIT_ROWS = (
@@ -160,6 +161,21 @@ class TestSuccessfulWrite:
             ["601", "2002", "V+IND+PST+äöü", "2", "-0.2"],
         ]
         assert sorted(p.name for p in tmp_path.iterdir()) == ["dev-predictions.csv"]
+
+    def test_test_split_write(self, tmp_path):
+        output = tmp_path / "test-predictions.csv"
+        rows = (
+            PredictionRow(701, 3001, "PRON", 1, 0.7),
+            PredictionRow(701, 3002, "N", 2, 0.2),
+        )
+        validation = write_split_predictions(
+            rows, output, benchmark=_benchmark(), split="test"
+        )
+        assert validation.is_valid
+        assert validation.split == "test"
+        assert validation.expected_word_count == 1
+        assert validation.expected_candidate_count == 2
+        assert output.exists()
 
     def test_unicode_quoting_no_rounding_inputs_unchanged(self, tmp_path):
         output = tmp_path / "dev-predictions.csv"

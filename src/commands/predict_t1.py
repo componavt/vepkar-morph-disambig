@@ -1,4 +1,4 @@
-"""Predict dev candidate rankings with a saved T1 model bundle."""
+"""Predict dev or test candidate rankings with a saved T1 model bundle."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from t1_features.prediction_io import (
     T1PredictionPublishedCleanupError,
     T1PredictionWriteError,
     write_dev_predictions,
+    write_split_predictions,
 )
 from t1_features.ranking import rank_candidate_scores
 from t1_features.run_context import T1RunContextError, load_t1_run_context
@@ -31,7 +32,8 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
     except T1RunContextError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    output_path = context.run_dir / "dev.csv"
+    split = args.split
+    output_path = context.run_dir / f"{split}.csv"
     if output_path.is_dir():
         print("error: output path is a directory:", file=sys.stderr)
         print(f"  {output_path}", file=sys.stderr)
@@ -56,7 +58,7 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
         inputs = load_t1_inputs(
             data_dir,
             tag,
-            split="dev",
+            split=split,
             split_file_override=split_file,
         )
     except DataError:
@@ -69,7 +71,7 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
         print(f"  {exc}", file=sys.stderr)
         return 1
     if not inputs.instances:
-        print("error: no dev word occurrences selected for prediction", file=sys.stderr)
+        print(f"error: no {split} word occurrences selected for prediction", file=sys.stderr)
         return 1
     try:
         examples = build_candidate_examples(
@@ -102,14 +104,22 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
         print(f"  {exc}", file=sys.stderr)
         return 1
     try:
-        validation = write_dev_predictions(
-            rows,
-            output_path,
-            benchmark=inputs.benchmark,
-        )
+        if split == "dev":
+            validation = write_dev_predictions(
+                rows,
+                output_path,
+                benchmark=inputs.benchmark,
+            )
+        else:
+            validation = write_split_predictions(
+                rows,
+                output_path,
+                benchmark=inputs.benchmark,
+                split=split,
+            )
     except T1PredictionPublishedCleanupError as exc:
         print(
-            "error: T1 dev predictions were published, but temporary cleanup failed:",
+            f"error: T1 {split} predictions were published, but temporary cleanup failed:",
             file=sys.stderr,
         )
         print(f"  output: {exc.output_path}", file=sys.stderr)
@@ -129,7 +139,7 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
     print(f"Model: {model_path}")
     print(f"Data tag: {tag}")
     print(f"Split file: {inputs.benchmark.split_path}")
-    print("Split: dev")
+    print(f"Split: {split}")
     print(f"Predicted word occurrences: {validation.predicted_word_count}")
     print(f"Predicted candidate rows: {validation.predicted_candidate_count}")
     print(f"Output: {output_path}")

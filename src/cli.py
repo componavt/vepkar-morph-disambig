@@ -229,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     predict_t1 = commands.add_parser(
         "predict-t1",
-        help="Predict dev candidate rankings with a saved T1 model bundle",
+        help="Predict dev or test candidate rankings with a saved T1 model bundle",
         allow_abbrev=False,
     )
     predict_t1.add_argument(
@@ -237,6 +237,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         help="Existing prepared T1 run directory",
+    )
+    predict_t1.add_argument(
+        "--split",
+        choices=("dev", "test"),
+        default="dev",
+        help="Benchmark split to predict (default: dev)",
     )
     evaluate_t1_run = commands.add_parser(
         "evaluate-t1-run",

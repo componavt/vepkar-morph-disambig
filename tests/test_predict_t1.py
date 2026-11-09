@@ -297,8 +297,9 @@ class TestArgumentParsing:
         assert exc.value.code == 0
         assert "--run-dir" in captured.out
         assert "--strict-code" not in captured.out
-        for removed in ("--model", "--split", "--output", "--data-dir", "--split-file"):
+        for removed in ("--model", "--output", "--data-dir", "--split-file"):
             assert removed not in captured.out
+        assert "--split" in captured.out
 
     def test_requires_run_dir(self, capsys):
         with pytest.raises(SystemExit) as exc:
@@ -320,7 +321,6 @@ class TestArgumentParsing:
         "removed",
         [
             ["--model", "m.bundle"],
-            ["--split", "dev"],
             ["--output", "out.csv"],
             ["--data-dir", "checkout"],
             ["--split-file", "splits.csv"],

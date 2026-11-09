@@ -72,8 +72,8 @@ T1.1 ranks candidates using logistic regression. Features include
 the candidate's grammatical features, word suffixes, and immediately
 adjacent words. Analysis frequencies are not used as features.
 A single shared model is trained on the combined `train` split of
-the four language varieties; prediction and evaluation currently
-support only `dev`.
+the four language varieties. T1 prediction supports `dev` and `test`;
+`evaluate-t1-run` publishes metrics for `dev`.
 
 Run the commands from the repository root with the `.venv` environment
 activated, after obtaining the source data.
@@ -99,6 +99,19 @@ The run directory is populated in sequence with `run.json` containing
 the experiment settings, `model.bundle` containing the model,
 `dev.csv` containing predictions, and `metrics.json` containing metrics.
 Existing results are not overwritten.
+
+For a final held-out evaluation, predict `test` once after selecting the
+settings on `dev`:
+
+```bash
+python src/cli.py predict-t1 --run-dir "$RUN_DIR" --split test
+python src/cli.py validate-predictions --predictions "$RUN_DIR/test.csv" --split test
+python src/cli.py evaluate-predictions --predictions "$RUN_DIR/test.csv" --split test
+```
+
+`evaluate-predictions` also accepts `--data-dir` and `--split-file` when the
+default paths are not in use. It prints test metrics without writing over
+the run's dev `metrics.json`.
 
 No configuration is needed when using the default paths. To use other
 paths, create the optional `t1.local.toml`; see `t1.local.example.toml`

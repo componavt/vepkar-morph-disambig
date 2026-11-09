@@ -1,0 +1,19 @@
+{
+  "goal": "G1",
+  "data_tag": "v2026.11",
+  "target_split": "test",
+  "selected_method": "t1.1",
+  "selected_C": 10.0,
+  "selection_split": "dev",
+  "selection_rule": "Highest observed dev Top-1 among the ten preapproved C values; MRR and Top-3 reported as secondary metrics.",
+  "dev_top1": 0.8591657099119786,
+  "dev_mrr": 0.9257239443806607,
+  "dev_top3": 0.9973210868733257,
+  "bootstrap": {
+    "unit": "(language, text_id)",
+    "samples": 1000,
+    "seed": 20261109,
+    "confidence_interval": "percentile 95%"
+  },
+  "test_access": "T1.1 and frequency baseline are each evaluated once after this selection record."
+}

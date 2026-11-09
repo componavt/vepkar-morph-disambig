@@ -1,4 +1,4 @@
-"""T1 input preparation: strict train/dev instances with full sentence context."""
+"""T1 input preparation: strict split instances with full sentence context."""
 
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -10,13 +10,13 @@ from core.predictions import BenchmarkIntegrityError
 from core.splits import SPLIT_NAMES, SplitError
 from t1_features.features import ContextWord
 
-TARGET_SPLITS = ("train", "dev")
+TARGET_SPLITS = ("train", "dev", "test")
 
 
 @dataclass(frozen=True)
 class T1Inputs:
     benchmark: BenchmarkContext
-    split: Literal["train", "dev"]
+    split: Literal["train", "dev", "test"]
     instances: tuple[Instance, ...]
     context_words: tuple[ContextWord, ...]
 
@@ -67,7 +67,7 @@ def load_t1_inputs(
     data_dir: Path,
     tag: str,
     *,
-    split: Literal["train", "dev"],
+    split: Literal["train", "dev", "test"],
     split_file_override: Path | None = None,
 ) -> T1Inputs:
     """Prepare the strict ``split`` instances and their full sentence context."""
