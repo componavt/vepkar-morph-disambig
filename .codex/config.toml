@@ -1,0 +1,6 @@
+sandbox_mode = "workspace-write"
+approval_policy = "never"
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = ["/home/componavt/all_c/pcloud/chat/vepkar-morph-disambig/claude"]
