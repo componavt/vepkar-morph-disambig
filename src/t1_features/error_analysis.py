@@ -465,6 +465,146 @@ def validate_t1_error_table_invariants(tables: dict[str, list[dict]]) -> dict[st
         "instances",
     )
 
+    # Treat the complete candidate list for each usage as the source of truth
+    # for both kinds of diagnostic alternatives.
+    candidates_by_usage: dict[tuple, list[dict]] = defaultdict(list)
+    candidate_table_keys = set()
+    for row in tables["candidates"]:
+        usage_key = (
+            row["language"], int(row["text_id"]), int(row["sentence_id"]), int(row["word_id"])
+        )
+        if usage_key not in instance_by_key:
+            raise T1ErrorAnalysisError(f"candidate row has no matching instance: {usage_key!r}")
+        candidate_key = (usage_key, int(row["wordform_id"]), str(row["gramset"]))
+        if candidate_key in candidate_table_keys:
+            raise T1ErrorAnalysisError(f"duplicate candidate row: {candidate_key!r}")
+        candidate_table_keys.add(candidate_key)
+        candidates_by_usage[usage_key].append(row)
+
+    expected_conflict_details = {}
+    expected_same_gramset_details = {}
+    for usage_key, instance in instance_by_key.items():
+        candidate_rows = candidates_by_usage.get(usage_key, [])
+        if len(candidate_rows) != int(instance["candidate_count"]):
+            raise T1ErrorAnalysisError(f"candidate count disagrees with instance {usage_key!r}")
+        if not candidate_rows:
+            raise T1ErrorAnalysisError(f"candidate list is empty for instance {usage_key!r}")
+        gold_key = (int(instance["gold_wordform_id"]), str(instance["gold_gramset"]))
+        top1_key = (int(instance["top1_wordform_id"]), str(instance["top1_gramset"]))
+        if int(instance["is_correct"]) not in (0, 1):
+            raise T1ErrorAnalysisError(f"invalid correctness flag for instance {usage_key!r}")
+        gold_rows = [row for row in candidate_rows if int(row["is_gold"]) == 1]
+        top1_rows = [row for row in candidate_rows if int(row["is_top1"]) == 1]
+        if len(gold_rows) != 1 or len(top1_rows) != 1:
+            raise T1ErrorAnalysisError(f"candidate table needs one gold and one Top-1 for {usage_key!r}")
+        if (int(gold_rows[0]["wordform_id"]), str(gold_rows[0]["gramset"])) != gold_key:
+            raise T1ErrorAnalysisError(f"candidate gold key disagrees with instance {usage_key!r}")
+        if (int(top1_rows[0]["wordform_id"]), str(top1_rows[0]["gramset"])) != top1_key:
+            raise T1ErrorAnalysisError(f"candidate Top-1 key disagrees with instance {usage_key!r}")
+        if int(top1_rows[0]["rank"]) != 1:
+            raise T1ErrorAnalysisError(f"candidate Top-1 is not rank 1 for {usage_key!r}")
+        gold_row = gold_rows[0]
+        top1_row = top1_rows[0]
+        if int(instance["gold_rank"]) != int(gold_row["rank"]):
+            raise T1ErrorAnalysisError(f"gold rank disagrees with candidates for {usage_key!r}")
+        if int(instance["top1_rank"]) != int(top1_row["rank"]):
+            raise T1ErrorAnalysisError(f"Top-1 rank disagrees with candidates for {usage_key!r}")
+        if not math.isclose(float(instance["gold_score"]), float(gold_row["score"]), rel_tol=0.0, abs_tol=1e-12):
+            raise T1ErrorAnalysisError(f"gold score disagrees with candidates for {usage_key!r}")
+        if not math.isclose(float(instance["top1_score"]), float(top1_row["score"]), rel_tol=0.0, abs_tol=1e-12):
+            raise T1ErrorAnalysisError(f"Top-1 score disagrees with candidates for {usage_key!r}")
+        same_wordform = int(top1_key[0] == gold_key[0])
+        same_gramset = int(top1_key[1] == gold_key[1])
+        correct = int(top1_key == gold_key)
+        if int(instance["same_wordform_id_as_gold"]) != same_wordform:
+            raise T1ErrorAnalysisError(f"same-wordform flag disagrees with candidates for {usage_key!r}")
+        if int(instance["same_gramset_as_gold"]) != same_gramset:
+            raise T1ErrorAnalysisError(f"same-gramset flag disagrees with candidates for {usage_key!r}")
+        if int(instance["is_correct"]) != correct:
+            raise T1ErrorAnalysisError(f"instance correctness flag disagrees with candidate keys {usage_key!r}")
+        expected_category = ""
+        if not correct:
+            if same_wordform and not same_gramset:
+                expected_category = "same_wordform_id_different_gramset"
+            elif not same_wordform and not same_gramset:
+                expected_category = "different_wordform_id_different_gramset"
+            elif not same_wordform and same_gramset:
+                expected_category = "different_wordform_id_same_gramset"
+        if instance["error_category"] != expected_category:
+            raise T1ErrorAnalysisError(f"error category disagrees with candidate keys {usage_key!r}")
+
+        alternatives_by_gramset: dict[str, list[dict]] = defaultdict(list)
+        for candidate_row in candidate_rows:
+            identity = (int(candidate_row["wordform_id"]), str(candidate_row["gramset"]))
+            if int(candidate_row["is_gold"]) not in (0, 1) or int(candidate_row["is_top1"]) not in (0, 1):
+                raise T1ErrorAnalysisError(f"invalid candidate flags for {usage_key!r}")
+            if bool(candidate_row["is_gold"]) != (identity == gold_key):
+                raise T1ErrorAnalysisError(f"candidate gold flag disagrees with identity {usage_key!r}")
+            if bool(candidate_row["is_top1"]) != (identity == top1_key):
+                raise T1ErrorAnalysisError(f"candidate Top-1 flag disagrees with identity {usage_key!r}")
+            alternatives_by_gramset[identity[1]].append(candidate_row)
+
+        for gramset, alternatives in alternatives_by_gramset.items():
+            if gramset == gold_key[1]:
+                for alternative in alternatives:
+                    identity = (int(alternative["wordform_id"]), str(alternative["gramset"]))
+                    if identity == gold_key:
+                        continue
+                    detail_key = (*usage_key, gold_key[0], gold_key[1], identity[0], identity[1])
+                    expected_same_gramset_details[detail_key] = (
+                        int(identity == top1_key), int(identity == top1_key)
+                    )
+            else:
+                detail_key = (*usage_key, gold_key[1], gramset)
+                expected_conflict_details[detail_key] = (
+                    len(alternatives), int(top1_key[1] == gramset)
+                )
+
+    actual_conflict_details = _unique_rows(
+        tables["conflict_opportunities"],
+        lambda row: (
+            row["language"], int(row["text_id"]), int(row["sentence_id"]), int(row["word_id"]),
+            str(row["gold_gramset"]), str(row["alternative_gramset"]),
+        ),
+        "conflict opportunities",
+    )
+    if set(actual_conflict_details) != set(expected_conflict_details):
+        missing = sorted(set(expected_conflict_details) - set(actual_conflict_details))[:3]
+        extra = sorted(set(actual_conflict_details) - set(expected_conflict_details))[:3]
+        raise T1ErrorAnalysisError(
+            "conflict opportunities disagree with candidate lists; "
+            f"missing={missing!r}, extra={extra!r}"
+        )
+    for key, expected_values in expected_conflict_details.items():
+        row = actual_conflict_details[key]
+        actual_values = (int(row["alternative_candidate_count"]), int(row["selected_error"]))
+        if actual_values != expected_values:
+            raise T1ErrorAnalysisError(f"conflict opportunity disagrees with candidates for {key!r}")
+
+    actual_same_gramset_details = _unique_rows(
+        tables["same_gramset_alternatives"],
+        lambda row: (
+            row["language"], int(row["text_id"]), int(row["sentence_id"]), int(row["word_id"]),
+            int(row["gold_wordform_id"]), str(row["gold_gramset"]),
+            int(row["alternative_wordform_id"]), str(row["alternative_gramset"]),
+        ),
+        "same-gramset alternatives",
+    )
+    if set(actual_same_gramset_details) != set(expected_same_gramset_details):
+        missing = sorted(set(expected_same_gramset_details) - set(actual_same_gramset_details))[:3]
+        extra = sorted(set(actual_same_gramset_details) - set(expected_same_gramset_details))[:3]
+        raise T1ErrorAnalysisError(
+            "same-gramset alternatives disagree with candidate lists; "
+            f"missing={missing!r}, extra={extra!r}"
+        )
+    for key, expected_values in expected_same_gramset_details.items():
+        row = actual_same_gramset_details[key]
+        actual_values = (int(row["is_top1"]), int(row["selected_error"]))
+        if actual_values != expected_values:
+            raise T1ErrorAnalysisError(
+                f"same-gramset alternative disagrees with candidates for {key!r}"
+            )
+
     # Rebuild directed confusion counts from the per-usage records.
     expected_confusions = Counter(
         (str(row["gold_gramset"]), str(row["top1_gramset"])) for row in errors

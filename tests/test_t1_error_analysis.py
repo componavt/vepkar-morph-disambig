@@ -106,6 +106,19 @@ def _three_usage_tables():
     return _build(instances, predictions)
 
 
+def _two_same_conflict_tables():
+    candidates = (Candidate(1, "G"), Candidate(2, "H"))
+    instances = (
+        _instance(10, "a", candidates, Candidate(1, "G"), sentence_id=50),
+        _instance(11, "b", candidates, Candidate(1, "G"), sentence_id=51),
+    )
+    predictions = (
+        *_rows(10, candidates, ((2, "H"), (1, "G"))),
+        *_rows(11, candidates, ((1, "G"), (2, "H"))),
+    )
+    return _build(instances, predictions)
+
+
 def test_correct_choice_keeps_available_conflict_denominator():
     candidates = (Candidate(1, "G"), Candidate(2, "H"))
     instance = _instance(10, "form", candidates, Candidate(1, "G"))
@@ -365,6 +378,67 @@ def test_invariant_validator_checks_correct_usage_count_within_each_form():
     other["instance_count"] += 1
     # The total remains unchanged, but the implied correct count in each form changes.
     with pytest.raises(T1ErrorAnalysisError, match="instance_count disagrees"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_conflict_opportunities_must_match_candidate_set_of_each_usage():
+    tables = deepcopy(_two_same_conflict_tables())
+    rows = tables["conflict_opportunities"]
+    rows[0]["word_id"], rows[1]["word_id"] = rows[1]["word_id"], rows[0]["word_id"]
+    with pytest.raises(T1ErrorAnalysisError, match="conflict opportunities disagree with candidate lists"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_selected_error_cannot_be_moved_between_usages_with_same_gramset_pair():
+    tables = deepcopy(_two_same_conflict_tables())
+    rows = tables["conflict_opportunities"]
+    rows[0]["selected_error"], rows[1]["selected_error"] = (
+        rows[1]["selected_error"], rows[0]["selected_error"]
+    )
+    # The G→H aggregate remains one error in two opportunities.
+    assert tables["conflict_summary"][0]["selected_error_count"] == 1
+    with pytest.raises(T1ErrorAnalysisError, match="conflict opportunity disagrees with candidates"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_conflict_alternative_candidate_count_must_match_candidates():
+    tables = deepcopy(_two_same_conflict_tables())
+    tables["conflict_opportunities"][0]["alternative_candidate_count"] = 2
+    with pytest.raises(T1ErrorAnalysisError, match="conflict opportunity disagrees with candidates"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_same_gramset_alternative_must_match_full_candidate_identity_and_flags():
+    candidates = (Candidate(1, "G"), Candidate(2, "G"), Candidate(3, "H"))
+    instance = _instance(10, "form", candidates, Candidate(1, "G"))
+    predictions = _rows(10, candidates, ((2, "G"), (1, "G"), (3, "H")))
+    tables = deepcopy(_build((instance,), predictions))
+    tables["same_gramset_alternatives"][0]["alternative_wordform_id"] = 999
+    with pytest.raises(T1ErrorAnalysisError, match="same-gramset alternatives disagree with candidate lists"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_same_gramset_selected_error_must_match_top1_candidate():
+    candidates = (Candidate(1, "G"), Candidate(2, "G"), Candidate(3, "H"))
+    instance = _instance(10, "form", candidates, Candidate(1, "G"))
+    predictions = _rows(10, candidates, ((2, "G"), (1, "G"), (3, "H")))
+    tables = deepcopy(_build((instance,), predictions))
+    tables["same_gramset_alternatives"][0]["selected_error"] = 0
+    with pytest.raises(T1ErrorAnalysisError, match="same-gramset alternative disagrees with candidates"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_instance_identity_flags_and_error_category_must_match_candidate_keys():
+    tables = deepcopy(_three_usage_tables())
+    error = next(row for row in tables["instances"] if not row["is_correct"])
+    error["same_wordform_id_as_gold"] = 1
+    with pytest.raises(T1ErrorAnalysisError, match="same-wordform flag disagrees"):
+        validate_t1_error_table_invariants(tables)
+
+    tables = deepcopy(_three_usage_tables())
+    error = next(row for row in tables["instances"] if not row["is_correct"])
+    error["error_category"] = "different_wordform_id_same_gramset"
+    with pytest.raises(T1ErrorAnalysisError, match="error category disagrees"):
         validate_t1_error_table_invariants(tables)
 
 

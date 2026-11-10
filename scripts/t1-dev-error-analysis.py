@@ -30,7 +30,7 @@ from t1_features.error_analysis import (  # noqa: E402
 
 DEFAULT_EXPERIMENT = ROOT / "work/experiments/v2026.11/context-ablation-k5-v1"
 DEFAULT_RUN_DIR = DEFAULT_EXPERIMENT / "runs/both/c-7"
-DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v3"
+DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v5"
 
 CSV_FIELDS = {
     "instances": (
