@@ -20,14 +20,17 @@ from core.data import SUPPORTED_LANGUAGES  # noqa: E402
 from core.predictions import validate_predictions  # noqa: E402
 from t1_features.data import load_t1_inputs  # noqa: E402
 from t1_features.error_analysis import (  # noqa: E402
+    FROZEN_PREDICTIONS_SHA256,
     T1ErrorAnalysisError,
     build_t1_error_tables,
+    resolve_recorded_prediction_path,
     validate_t1_error_table_invariants,
+    validate_frozen_prediction_hash,
 )
 
 DEFAULT_EXPERIMENT = ROOT / "work/experiments/v2026.11/context-ablation-k5-v1"
 DEFAULT_RUN_DIR = DEFAULT_EXPERIMENT / "runs/both/c-7"
-DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v2"
+DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v3"
 
 CSV_FIELDS = {
     "instances": (
@@ -145,7 +148,9 @@ def _load_json(path: Path) -> dict:
     return value
 
 
-def _verify_run_metadata(run: dict, experiment: dict, run_dir: Path, prediction_path: Path) -> None:
+def _verify_run_metadata(
+    run: dict, experiment: dict, run_dir: Path, experiment_dir: Path, prediction_path: Path
+) -> None:
     parameters = run.get("parameters", {})
     required = {
         "variant": "both",
@@ -162,7 +167,10 @@ def _verify_run_metadata(run: dict, experiment: dict, run_dir: Path, prediction_
             raise A1InputError(
                 f"run.json configuration mismatch for {key}: {observed.get(key)!r}; expected {expected!r}"
             )
-    recorded_prediction = (run_dir / str(run.get("predictions", ""))).resolve()
+    run_prediction_path = run.get("predictions")
+    if not isinstance(run_prediction_path, str) or not run_prediction_path.strip():
+        raise A1InputError("run.json is missing its predictions path")
+    recorded_prediction = (run_dir / run_prediction_path).resolve()
     if recorded_prediction != prediction_path.resolve():
         raise A1InputError(
             f"run.json points to {recorded_prediction}, not selected predictions {prediction_path}"
@@ -183,11 +191,17 @@ def _verify_run_metadata(run: dict, experiment: dict, run_dir: Path, prediction_
     selected_c = experiment.get("selected_C", {}).get("both", {}).get("C")
     if selected_c != 7.0:
         raise A1InputError(f"experiment summary selected C={selected_c!r}, expected C=7")
-    recorded_path = experiment.get("prediction_files", {}).get("both", {}).get("7.0")
-    if recorded_path is None or (run_dir.parent.parent.parent / recorded_path).resolve() != prediction_path.resolve():
-        # Paths in summary.json are relative to the experiment root.
-        if (run_dir.parent.parent.parent.parent / recorded_path).resolve() != prediction_path.resolve():
-            raise A1InputError("experiment summary prediction path does not match selected dev.csv")
+    try:
+        recorded_path = resolve_recorded_prediction_path(
+            experiment, experiment_dir, variant="both", c_value="7.0"
+        )
+    except T1ErrorAnalysisError as exc:
+        raise A1InputError(str(exc)) from exc
+    if recorded_path != prediction_path.resolve():
+        raise A1InputError(
+            "experiment summary prediction path does not match selected dev.csv: "
+            f"{recorded_path} != {prediction_path.resolve()}"
+        )
 
 
 def _benchmark_input_hashes(data_dir: Path) -> dict[str, str]:
@@ -290,10 +304,15 @@ def main() -> int:
         parser.error(f"frozen dev predictions do not exist: {prediction_path}")
     if args.output_dir.exists() or args.output_dir.is_symlink():
         parser.error(f"refusing to overwrite existing A1 output: {args.output_dir}")
+    actual_prediction_hash = _sha256(prediction_path)
+    try:
+        validate_frozen_prediction_hash(actual_prediction_hash)
+    except T1ErrorAnalysisError as exc:
+        parser.error(str(exc))
     run = _load_json(run_path)
     experiment = _load_json(summary_path)
     try:
-        _verify_run_metadata(run, experiment, run_dir, prediction_path)
+        _verify_run_metadata(run, experiment, run_dir, experiment_dir, prediction_path)
         if args.tag != "v2026.11" or determine_data_tag(data_dir) != args.tag:
             raise A1InputError("selected dictorpus-data checkout is not v2026.11")
         expected_data_commit = experiment.get("data", {}).get("commit")
@@ -373,11 +392,12 @@ def main() -> int:
     metadata = {
         "study": "T1 error analysis A1",
         "source_data_tag": args.tag,
-        "split": "dev",
+        "target_split": "dev",
         "configuration_as_recorded": provenance["configuration_as_recorded"],
         "prediction_source": {
             "path": str(prediction_path),
             "sha256": provenance["predictions_sha256"],
+            "expected_sha256": FROZEN_PREDICTIONS_SHA256,
             "frozen": True,
         },
         "run_json": {
@@ -388,7 +408,7 @@ def main() -> int:
             "path": str(summary_path),
             "sha256": provenance["experiment_summary_sha256"],
         },
-        "split": {"path": str(split_path), "sha256": _sha256(split_path)},
+        "split_file": {"path": str(split_path), "sha256": _sha256(split_path)},
         "benchmark_source_files_sha256": input_hashes,
         "provenance_limitations": provenance,
         "prediction_validation": {

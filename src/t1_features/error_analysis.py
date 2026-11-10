@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Iterable
 
 from core.instances import Instance
@@ -12,6 +13,36 @@ from core.predictions import PredictionRow
 
 class T1ErrorAnalysisError(ValueError):
     """The frozen predictions or benchmark cannot support diagnostic tables."""
+
+
+FROZEN_PREDICTIONS_SHA256 = "41451f143cf49da828d02ef64e0804de5501aaa106acdc2f8955b20c27b76c02"
+
+
+def validate_frozen_prediction_hash(actual_sha256: str) -> None:
+    """Reject any prediction file other than the approved frozen A1 input."""
+    if actual_sha256 != FROZEN_PREDICTIONS_SHA256:
+        raise T1ErrorAnalysisError(
+            "frozen dev.csv checksum mismatch: "
+            f"got {actual_sha256}, expected {FROZEN_PREDICTIONS_SHA256}"
+        )
+
+
+def resolve_recorded_prediction_path(
+    experiment: dict, experiment_dir: Path, *, variant: str, c_value: str
+) -> Path:
+    """Resolve a prediction path recorded relative to its experiment directory."""
+    prediction_files = experiment.get("prediction_files")
+    variant_files = prediction_files.get(variant) if isinstance(prediction_files, dict) else None
+    recorded_path = variant_files.get(c_value) if isinstance(variant_files, dict) else None
+    if not isinstance(recorded_path, str) or not recorded_path.strip():
+        raise T1ErrorAnalysisError(
+            "experiment summary is missing prediction_files"
+            f"[{variant!r}][{c_value!r}]"
+        )
+    path = Path(recorded_path)
+    if not path.is_absolute():
+        path = experiment_dir / path
+    return path.resolve()
 
 
 TABLE_NAMES = (
@@ -413,22 +444,41 @@ def build_t1_error_tables(
 
 
 def validate_t1_error_table_invariants(tables: dict[str, list[dict]]) -> dict[str, int]:
-    """Check A1 cross-table conservation rules and return audit counts."""
+    """Check detailed-to-summary consistency and return audit counts."""
     for name in TABLE_NAMES:
         if name not in tables:
             raise T1ErrorAnalysisError(f"missing diagnostic table: {name}")
     instances = tables["instances"]
+    if not instances:
+        raise T1ErrorAnalysisError("instances table is empty")
     errors = [row for row in instances if not row["is_correct"]]
     correct_count = len(instances) - len(errors)
     candidate_count = len(tables["candidates"])
     if len(instances) != correct_count + len(errors):
         raise T1ErrorAnalysisError("instances != correct + errors")
-    if sum(int(row["error_count"]) for row in tables["sentence_summary"]) != len(errors):
-        raise T1ErrorAnalysisError("sentence error counts do not sum to all errors")
-    if sum(int(row["error_count"]) for row in tables["form_summary"]) != len(errors):
-        raise T1ErrorAnalysisError("form error counts do not sum to all errors")
-    if sum(int(row["confusion_count"]) for row in tables["confusions"]) != len(errors):
-        raise T1ErrorAnalysisError("directed confusions do not sum to all errors")
+
+    instance_by_key = _unique_rows(
+        instances,
+        lambda row: (
+            row["language"], int(row["text_id"]), int(row["sentence_id"]), int(row["word_id"])
+        ),
+        "instances",
+    )
+
+    # Rebuild directed confusion counts from the per-usage records.
+    expected_confusions = Counter(
+        (str(row["gold_gramset"]), str(row["top1_gramset"])) for row in errors
+    )
+    actual_confusions = _unique_rows(
+        tables["confusions"],
+        lambda row: (str(row["gold_gramset"]), str(row["top1_gramset"])),
+        "confusions",
+    )
+    if set(actual_confusions) != set(expected_confusions):
+        raise T1ErrorAnalysisError("confusions keys disagree with erroneous instances")
+    for key, expected_count in expected_confusions.items():
+        if int(actual_confusions[key]["confusion_count"]) != expected_count:
+            raise T1ErrorAnalysisError(f"confusion count disagrees with instances for {key!r}")
 
     different_gramset_errors = sum(
         not row["same_gramset_as_gold"] for row in errors
@@ -453,16 +503,155 @@ def validate_t1_error_table_invariants(tables: dict[str, list[dict]]) -> dict[st
     ]
     if len(opportunity_keys) != len(set(opportunity_keys)):
         raise T1ErrorAnalysisError("duplicate usage/G/H conflict opportunity")
-    for row in tables["conflict_summary"]:
-        if int(row["selected_error_count"]) > int(row["opportunity_count"]):
-            raise T1ErrorAnalysisError("selected conflict errors exceed opportunities")
+    expected_conflicts: Counter = Counter()
+    expected_selected_errors: Counter = Counter()
+    for row in tables["conflict_opportunities"]:
+        key = (str(row["gold_gramset"]), str(row["alternative_gramset"]))
+        expected_conflicts[key] += 1
+        selected = int(row["selected_error"])
+        if selected not in (0, 1):
+            raise T1ErrorAnalysisError(f"invalid selected_error flag for conflict {key!r}")
+        expected_selected_errors[key] += selected
+        if int(row["alternative_candidate_count"]) < 1:
+            raise T1ErrorAnalysisError(f"non-positive alternative candidate count for {key!r}")
 
-    if len(tables["sentence_instance_links"]) != len(instances):
-        raise T1ErrorAnalysisError("sentence links do not cover every benchmark instance")
-    if len(tables["sentence_error_links"]) != len(errors):
-        raise T1ErrorAnalysisError("sentence error links do not cover every error")
-    if len(tables["form_instance_links"]) != len(instances):
-        raise T1ErrorAnalysisError("form links do not cover every benchmark instance")
+    actual_conflict_summary = _unique_rows(
+        tables["conflict_summary"],
+        lambda row: (str(row["gold_gramset"]), str(row["alternative_gramset"])),
+        "conflict summary",
+    )
+    if set(actual_conflict_summary) != set(expected_conflicts):
+        raise T1ErrorAnalysisError("conflict summary keys disagree with detailed opportunities")
+    for key, expected_opportunities in expected_conflicts.items():
+        row = actual_conflict_summary[key]
+        opportunity_count = int(row["opportunity_count"])
+        selected_error_count = int(row["selected_error_count"])
+        expected_selected = expected_selected_errors[key]
+        if opportunity_count != expected_opportunities:
+            raise T1ErrorAnalysisError(f"opportunity count disagrees with details for {key!r}")
+        if selected_error_count != expected_selected:
+            raise T1ErrorAnalysisError(f"selected-error count disagrees with details for {key!r}")
+        if selected_error_count > opportunity_count:
+            raise T1ErrorAnalysisError("selected conflict errors exceed opportunities")
+        rate = float(row["selected_error_rate"])
+        expected_rate = expected_selected / expected_opportunities
+        if not math.isfinite(rate) or not math.isclose(rate, expected_rate, rel_tol=0.0, abs_tol=1e-12):
+            raise T1ErrorAnalysisError(f"selected-error rate disagrees with counts for {key!r}")
+
+    # Every usage must occur exactly once in the sentence and form link tables;
+    # error links must be exactly the erroneous subset.
+    link_fields = (
+        "language", "text_id", "sentence_id", "word_id", "target_position",
+        "gold_gramset", "top1_gramset", "gold_rank", "is_correct", "error_category",
+    )
+    expected_sentence_links = {
+        key: tuple(row[field] for field in link_fields)
+        for key, row in instance_by_key.items()
+    }
+    actual_sentence_links = _unique_rows(
+        tables["sentence_instance_links"],
+        lambda row: (
+            row["language"], int(row["text_id"]), int(row["sentence_id"]), int(row["word_id"])
+        ),
+        "sentence instance links",
+    )
+    _assert_link_projection(
+        actual_sentence_links, expected_sentence_links, link_fields, "sentence instance links"
+    )
+    expected_error_links = {
+        key: value for key, value in expected_sentence_links.items()
+        if not int(instance_by_key[key]["is_correct"])
+    }
+    actual_error_links = _unique_rows(
+        tables["sentence_error_links"],
+        lambda row: (
+            row["language"], int(row["text_id"]), int(row["sentence_id"]), int(row["word_id"])
+        ),
+        "sentence error links",
+    )
+    _assert_link_projection(
+        actual_error_links, expected_error_links, link_fields, "sentence error links"
+    )
+
+    form_fields = (
+        "language", "normalized_form", "text_id", "sentence_id", "word_id",
+        "gold_gramset", "top1_gramset", "gold_rank", "is_correct", "error_category",
+    )
+    expected_form_links = {
+        key: tuple(row[field] for field in form_fields)
+        for key, row in instance_by_key.items()
+    }
+    actual_form_links = _unique_rows(
+        tables["form_instance_links"],
+        lambda row: (
+            row["language"], int(row["text_id"]), int(row["sentence_id"]), int(row["word_id"])
+        ),
+        "form instance links",
+    )
+    _assert_link_projection(actual_form_links, expected_form_links, form_fields, "form instance links")
+
+    # Rebuild every sentence aggregate from instances, including correct usages.
+    sentence_groups: dict[tuple, list[dict]] = defaultdict(list)
+    form_groups: dict[tuple, list[dict]] = defaultdict(list)
+    for row in instances:
+        sentence_groups[(row["language"], int(row["text_id"]), int(row["sentence_id"]))].append(row)
+        form_groups[(row["language"], str(row["normalized_form"]))].append(row)
+
+    expected_sentence_summary = {}
+    for key, rows in sentence_groups.items():
+        group_errors = [row for row in rows if not int(row["is_correct"])]
+        expected_sentence_summary[key] = {
+            "benchmark_instance_count": len(rows),
+            "error_count": len(group_errors),
+            "error_rate": len(group_errors) / len(rows),
+            "distinct_directed_confusion_count": len({
+                (str(row["gold_gramset"]), str(row["top1_gramset"])) for row in group_errors
+            }),
+            "sentence": rows[0]["sentence"],
+        }
+    actual_sentence_summary = _unique_rows(
+        tables["sentence_summary"],
+        lambda row: (row["language"], int(row["text_id"]), int(row["sentence_id"])),
+        "sentence summary",
+    )
+    _assert_group_summary(
+        actual_sentence_summary,
+        expected_sentence_summary,
+        ("benchmark_instance_count", "error_count", "distinct_directed_confusion_count", "sentence"),
+        ("error_rate",),
+        "sentence summary",
+    )
+
+    expected_form_summary = {}
+    for key, rows in form_groups.items():
+        group_errors = [row for row in rows if not int(row["is_correct"])]
+        expected_form_summary[key] = {
+            "instance_count": len(rows),
+            "error_count": len(group_errors),
+            "text_count": len({int(row["text_id"]) for row in rows}),
+            "sentence_count": len({(int(row["text_id"]), int(row["sentence_id"])) for row in rows}),
+            "distinct_gold_gramset_count": len({str(row["gold_gramset"]) for row in rows}),
+            "distinct_directed_error_count": len({
+                (str(row["gold_gramset"]), str(row["top1_gramset"])) for row in group_errors
+            }),
+            "normalization": "identity_from_normalized_corpus_word_field",
+        }
+    actual_form_summary = _unique_rows(
+        tables["form_summary"],
+        lambda row: (row["language"], str(row["normalized_form"])),
+        "form summary",
+    )
+    _assert_group_summary(
+        actual_form_summary,
+        expected_form_summary,
+        (
+            "instance_count", "error_count", "text_count", "sentence_count",
+            "distinct_gold_gramset_count", "distinct_directed_error_count", "normalization",
+        ),
+        (),
+        "form summary",
+    )
+
     candidate_counts_by_word: Counter = Counter(
         int(row["word_id"]) for row in tables["candidates"]
     )
@@ -499,3 +688,50 @@ def validate_t1_error_table_invariants(tables: dict[str, list[dict]]) -> dict[st
         "sentences": len(tables["sentence_summary"]),
         "forms": len(tables["form_summary"]),
     }
+
+
+def _unique_rows(rows: list[dict], key_fn, label: str) -> dict[tuple, dict]:
+    indexed = {}
+    for row in rows:
+        key = key_fn(row)
+        if key in indexed:
+            raise T1ErrorAnalysisError(f"duplicate key in {label}: {key!r}")
+        indexed[key] = row
+    return indexed
+
+
+def _assert_link_projection(
+    actual: dict[tuple, dict], expected: dict[tuple, tuple], fields: tuple[str, ...], label: str
+) -> None:
+    if set(actual) != set(expected):
+        missing = sorted(set(expected) - set(actual))[:3]
+        extra = sorted(set(actual) - set(expected))[:3]
+        raise T1ErrorAnalysisError(f"{label} keys do not match instances; missing={missing!r}, extra={extra!r}")
+    for key, expected_values in expected.items():
+        actual_values = tuple(actual[key][field] for field in fields)
+        if actual_values != expected_values:
+            raise T1ErrorAnalysisError(f"{label} values disagree with instance {key!r}")
+
+
+def _assert_group_summary(
+    actual: dict[tuple, dict],
+    expected: dict[tuple, dict],
+    integer_fields: tuple[str, ...],
+    rate_fields: tuple[str, ...],
+    label: str,
+) -> None:
+    if set(actual) != set(expected):
+        missing = sorted(set(expected) - set(actual))[:3]
+        extra = sorted(set(actual) - set(expected))[:3]
+        raise T1ErrorAnalysisError(f"{label} keys do not match instances; missing={missing!r}, extra={extra!r}")
+    for key, expected_values in expected.items():
+        row = actual[key]
+        for field in integer_fields:
+            if row[field] != expected_values[field]:
+                raise T1ErrorAnalysisError(f"{label} {field} disagrees with instances for {key!r}")
+        for field in rate_fields:
+            value = float(row[field])
+            if not math.isfinite(value) or not math.isclose(
+                value, float(expected_values[field]), rel_tol=0.0, abs_tol=1e-12
+            ):
+                raise T1ErrorAnalysisError(f"{label} {field} disagrees with instances for {key!r}")

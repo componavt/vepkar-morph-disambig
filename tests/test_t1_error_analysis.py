@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import sys
 from pathlib import Path
 
@@ -15,9 +16,12 @@ from core.data import CorpusTables  # noqa: E402
 from core.instances import Candidate, Instance, build_language_instances  # noqa: E402
 from core.predictions import PredictionRow  # noqa: E402
 from t1_features.error_analysis import (  # noqa: E402
+    FROZEN_PREDICTIONS_SHA256,
     T1ErrorAnalysisError,
     build_t1_error_tables,
+    resolve_recorded_prediction_path,
     validate_t1_error_table_invariants,
+    validate_frozen_prediction_hash,
 )
 from t1_features.features import ContextWord  # noqa: E402
 
@@ -74,11 +78,32 @@ def _context(instances, extra_by_sentence=None):
 
 
 def _build(instances, predictions, context=None):
-    return build_t1_error_tables(
+    tables = build_t1_error_tables(
         instances,
         predictions,
         _context(instances) if context is None else context,
     )
+    validate_t1_error_table_invariants(tables)
+    return tables
+
+
+def _three_usage_tables():
+    candidates = (
+        (Candidate(1, "G"), Candidate(2, "H")),
+        (Candidate(3, "X"), Candidate(4, "Y")),
+        (Candidate(5, "P"), Candidate(6, "Q")),
+    )
+    instances = (
+        _instance(10, "same", candidates[0], Candidate(1, "G"), sentence_id=50),
+        _instance(11, "same", candidates[1], Candidate(3, "X"), sentence_id=51),
+        _instance(12, "other", candidates[2], Candidate(5, "P"), sentence_id=52),
+    )
+    predictions = (
+        *_rows(10, candidates[0], ((2, "H"), (1, "G"))),
+        *_rows(11, candidates[1], ((3, "X"), (4, "Y"))),
+        *_rows(12, candidates[2], ((6, "Q"), (5, "P"))),
+    )
+    return _build(instances, predictions)
 
 
 def test_correct_choice_keeps_available_conflict_denominator():
@@ -235,6 +260,112 @@ def test_gold_missing_from_candidate_list_is_rejected():
     predictions = _rows(10, candidates, ((1, "G"), (2, "H")))
     with pytest.raises(T1ErrorAnalysisError, match="expected one gold candidate"):
         _build((instance,), predictions)
+
+
+def test_non_finite_prediction_score_is_rejected():
+    candidates = (Candidate(1, "G"), Candidate(2, "H"))
+    instance = _instance(10, "form", candidates, Candidate(1, "G"))
+    predictions = (
+        PredictionRow(10, 1, "G", 1, float("nan")),
+        PredictionRow(10, 2, "H", 2, 0.0),
+    )
+    with pytest.raises(T1ErrorAnalysisError, match="non-finite score"):
+        _build((instance,), predictions)
+
+
+def test_non_contiguous_prediction_ranks_are_rejected():
+    candidates = (Candidate(1, "G"), Candidate(2, "H"))
+    instance = _instance(10, "form", candidates, Candidate(1, "G"))
+    predictions = (
+        PredictionRow(10, 1, "G", 1, 2.0),
+        PredictionRow(10, 2, "H", 3, 1.0),
+    )
+    with pytest.raises(T1ErrorAnalysisError, match="invalid ranks"):
+        _build((instance,), predictions)
+
+
+def test_saved_rank_order_must_respect_score_tie_break():
+    candidates = (Candidate(1, "G"), Candidate(2, "H"))
+    instance = _instance(10, "form", candidates, Candidate(1, "G"))
+    predictions = (
+        PredictionRow(10, 2, "H", 1, 1.0),
+        PredictionRow(10, 1, "G", 2, 1.0),
+    )
+    with pytest.raises(T1ErrorAnalysisError, match="score/tie-break"):
+        _build((instance,), predictions)
+
+
+def test_frozen_prediction_hash_is_pinned_to_approved_input():
+    validate_frozen_prediction_hash(FROZEN_PREDICTIONS_SHA256)
+    with pytest.raises(T1ErrorAnalysisError, match="checksum mismatch"):
+        validate_frozen_prediction_hash("0" * 64)
+
+
+def test_missing_recorded_prediction_path_has_clear_error():
+    with pytest.raises(T1ErrorAnalysisError, match="missing prediction_files"):
+        resolve_recorded_prediction_path(
+            {"prediction_files": {"both": {}}},
+            Path("/experiment"),
+            variant="both",
+            c_value="7.0",
+        )
+
+
+def test_recorded_prediction_path_is_resolved_from_experiment_directory():
+    path = resolve_recorded_prediction_path(
+        {"prediction_files": {"both": {"7.0": "runs/both/c-7/dev.csv"}}},
+        Path("/experiment"),
+        variant="both",
+        c_value="7.0",
+    )
+    assert path == Path("/experiment/runs/both/c-7/dev.csv")
+
+
+def test_invariant_validator_detects_pairwise_conflict_aggregate_corruption():
+    tables = deepcopy(_three_usage_tables())
+    rows = {row["gold_gramset"]: row for row in tables["conflict_summary"]}
+    # Swap the selected counts and rates, preserving the global selected-error sum.
+    rows["G"]["selected_error_count"], rows["X"]["selected_error_count"] = (
+        rows["X"]["selected_error_count"], rows["G"]["selected_error_count"]
+    )
+    rows["G"]["selected_error_rate"], rows["X"]["selected_error_rate"] = (
+        rows["X"]["selected_error_rate"], rows["G"]["selected_error_rate"]
+    )
+    with pytest.raises(T1ErrorAnalysisError, match="selected-error count disagrees"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_invariant_validator_rebuilds_confusions_per_pair():
+    tables = deepcopy(_three_usage_tables())
+    tables["confusions"][0]["confusion_count"] += 1
+    tables["confusions"][1]["confusion_count"] -= 1
+    with pytest.raises(T1ErrorAnalysisError, match="confusion count disagrees"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_invariant_validator_detects_duplicate_link_replacing_another_key():
+    tables = deepcopy(_three_usage_tables())
+    tables["sentence_instance_links"][0] = deepcopy(tables["sentence_instance_links"][1])
+    with pytest.raises(T1ErrorAnalysisError, match="duplicate key in sentence instance links"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_invariant_validator_checks_conflict_rates():
+    tables = deepcopy(_three_usage_tables())
+    tables["conflict_summary"][0]["selected_error_rate"] = 0.25
+    with pytest.raises(T1ErrorAnalysisError, match="selected-error rate disagrees"):
+        validate_t1_error_table_invariants(tables)
+
+
+def test_invariant_validator_checks_correct_usage_count_within_each_form():
+    tables = deepcopy(_three_usage_tables())
+    same = next(row for row in tables["form_summary"] if row["normalized_form"] == "same")
+    other = next(row for row in tables["form_summary"] if row["normalized_form"] == "other")
+    same["instance_count"] -= 1
+    other["instance_count"] += 1
+    # The total remains unchanged, but the implied correct count in each form changes.
+    with pytest.raises(T1ErrorAnalysisError, match="instance_count disagrees"):
+        validate_t1_error_table_invariants(tables)
 
 
 def test_strict_benchmark_excludes_zero_or_multiple_gold_candidates():
