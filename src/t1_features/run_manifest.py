@@ -20,7 +20,8 @@ import tempfile
 from pathlib import Path
 
 _FORMAT_NAME = "vepkar-t1-run"
-_FORMAT_VERSION = 4
+_FORMAT_VERSION = 5
+_LEGACY_FORMAT_VERSION = 4
 _STAGE = "prepared"
 _TARGET_SPLIT = "dev"
 _TEMP_PREFIX = ".vepkar-t1-run-"
@@ -37,7 +38,13 @@ _TOP_LEVEL_KEYS = (
 )
 _DATA_KEYS = ("root", "tag", "commit")
 _SPLIT_KEYS = ("path", "sha256")
-_PARAMETER_KEYS = ("C", "target_split")
+_PARAMETER_KEYS_V4 = ("C", "target_split")
+_PARAMETER_KEYS_V5 = (
+    "C",
+    "target_split",
+    "suffix_max_length",
+    "include_affix",
+)
 
 
 class RunManifestError(ValueError):
@@ -104,7 +111,7 @@ def _validate_positive_finite(value) -> None:
 
 
 def _validate_manifest(manifest: object) -> None:
-    """Require the exact version-4 T1 run passport schema."""
+    """Require an exact supported T1 run passport schema."""
     if not isinstance(manifest, dict):
         raise RunManifestError("invalid run manifest: expected a dictionary")
     _require_keys(manifest, _TOP_LEVEL_KEYS, "manifest")
@@ -113,13 +120,14 @@ def _validate_manifest(manifest: object) -> None:
             f"invalid run manifest: format must be {_FORMAT_NAME!r}, "
             f"got {manifest['format']!r}"
         )
-    if (
-        type(manifest["format_version"]) is not int
-        or manifest["format_version"] != _FORMAT_VERSION
+    version = manifest["format_version"]
+    if type(version) is not int or version not in (
+        _LEGACY_FORMAT_VERSION,
+        _FORMAT_VERSION,
     ):
         raise RunManifestError(
-            f"invalid run manifest: format_version must be the integer "
-            f"{_FORMAT_VERSION}, got {manifest['format_version']!r}"
+            "invalid run manifest: format_version must be one of the integers "
+            f"{_LEGACY_FORMAT_VERSION} or {_FORMAT_VERSION}, got {version!r}"
         )
     if manifest["stage"] != _STAGE:
         raise RunManifestError(
@@ -142,13 +150,28 @@ def _validate_manifest(manifest: object) -> None:
             f"64-character hexadecimal SHA-256, got {sha256!r}"
         )
     parameters = _require_mapping(manifest["parameters"], "manifest.parameters")
-    _require_keys(parameters, _PARAMETER_KEYS, "manifest.parameters")
+    expected_parameter_keys = (
+        _PARAMETER_KEYS_V4 if version == _LEGACY_FORMAT_VERSION else _PARAMETER_KEYS_V5
+    )
+    _require_keys(parameters, expected_parameter_keys, "manifest.parameters")
     _validate_positive_finite(parameters["C"])
     if parameters["target_split"] != _TARGET_SPLIT:
         raise RunManifestError(
             f"invalid run manifest: parameters.target_split must be "
             f"{_TARGET_SPLIT!r}, got {parameters['target_split']!r}"
         )
+    if version == _FORMAT_VERSION:
+        suffix_max_length = parameters["suffix_max_length"]
+        if type(suffix_max_length) is not int or suffix_max_length < 0:
+            raise RunManifestError(
+                "invalid run manifest: parameters.suffix_max_length must be "
+                f"a nonnegative integer, got {suffix_max_length!r}"
+            )
+        if type(parameters["include_affix"]) is not bool:
+            raise RunManifestError(
+                "invalid run manifest: parameters.include_affix must be a "
+                f"boolean, got {parameters['include_affix']!r}"
+            )
 
 
 def _git(root: Path, *args: str) -> str:
@@ -212,9 +235,20 @@ def collect_run_manifest(
     data_tag: str,
     split_file: Path,
     C: float,
+    suffix_max_length: int = 4,
+    include_affix: bool = False,
 ) -> dict:
     """Collect all recorded observations into one prepared run passport."""
     _validate_positive_finite(C)
+    if type(suffix_max_length) is not int or suffix_max_length < 0:
+        raise RunManifestError(
+            "parameters.suffix_max_length must be a nonnegative integer, "
+            f"got {suffix_max_length!r}"
+        )
+    if type(include_affix) is not bool:
+        raise RunManifestError(
+            f"parameters.include_affix must be a boolean, got {include_affix!r}"
+        )
     data_root = _repository_root(data_dir)
     data_snapshot = _git_snapshot(data_root)
     data = {
@@ -231,7 +265,12 @@ def collect_run_manifest(
             "path": str(split_file.resolve()),
             "sha256": _split_sha256(split_file),
         },
-        "parameters": {"C": C, "target_split": _TARGET_SPLIT},
+        "parameters": {
+            "C": C,
+            "target_split": _TARGET_SPLIT,
+            "suffix_max_length": suffix_max_length,
+            "include_affix": include_affix,
+        },
     }
     _validate_manifest(manifest)
     return manifest

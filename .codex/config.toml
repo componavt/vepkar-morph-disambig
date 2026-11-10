@@ -4,5 +4,6 @@ approval_policy = "on-request"
 [sandbox_workspace_write]
 network_access = true
 writable_roots = [
-    "/home/componavt/all_c/pcloud/chat/vepkar-morph-disambig/claude"
+    "/home/componavt/all_c/pcloud/chat/vepkar-morph-disambig/claude",
+    "/home/lunata/all_c/pcloud/chat/vepkar-morph-disambig/claude"
 ]

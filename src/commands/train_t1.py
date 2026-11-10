@@ -41,13 +41,21 @@ def _run_train_t1(args: argparse.Namespace) -> int:
     data_dir = Path(manifest["data"]["root"])
     tag = manifest["data"]["tag"]
     split_file = Path(manifest["split"]["path"])
-    C = manifest["parameters"]["C"]
+    parameters = manifest["parameters"]
+    C = parameters["C"]
+    suffix_max_length = parameters.get("suffix_max_length", 4)
+    include_affix = parameters.get("include_affix", False)
     try:
+        input_options = {
+            "split": "train",
+            "split_file_override": split_file,
+        }
+        if include_affix:
+            input_options["include_affix"] = True
         inputs = load_t1_inputs(
             data_dir,
             tag,
-            split="train",
-            split_file_override=split_file,
+            **input_options,
         )
     except DataError:
         return 1
@@ -59,10 +67,17 @@ def _run_train_t1(args: argparse.Namespace) -> int:
         print(f"  {exc}", file=sys.stderr)
         return 1
     try:
+        feature_options = {}
+        if suffix_max_length != 4:
+            feature_options["suffix_max_length"] = suffix_max_length
+        if include_affix:
+            feature_options["affix_by_candidate"] = inputs.affix_by_candidate
+            feature_options["include_affix"] = True
         examples = build_candidate_examples(
             inputs.instances,
             inputs.context_words,
             mode="train",
+            **feature_options,
         )
     except FeatureConstructionError as exc:
         print("error: T1 feature construction failed:", file=sys.stderr)
@@ -105,5 +120,7 @@ def _run_train_t1(args: argparse.Namespace) -> int:
     print(f"Training candidate examples: {len(examples)}")
     print(f"Feature columns: {len(model.vectorizer.vocabulary_)}")
     print(f"C: {C}")
+    print(f"Suffix maximum length: {suffix_max_length}")
+    print(f"Dictionary affix feature: {include_affix}")
     print(f"Model: {output_path}")
     return 0

@@ -157,6 +157,17 @@ class TestGramsetElements:
 
 
 class TestSuffixes:
+    def test_zero_maximum_disables_surface_suffix_features(self):
+        actual = _build_features(
+            language="en",
+            gramset="SG",
+            word="cats",
+            left_word="a",
+            right_word="b",
+            suffix_max_length=0,
+        )
+        assert not [key for key in actual if '"suffix_gramset"' in key]
+
     def test_ordinary_word(self):
         actual = _build_features(
             language="en",
@@ -219,6 +230,52 @@ class TestSuffixes:
             '["suffix_gramset","SG","3","ssa"]',
             '["suffix_gramset","SG","4","issa"]',
         ]
+
+    def test_configured_maximum_length(self):
+        actual = _build_features(
+            language="fi",
+            gramset="SG",
+            word="kissa",
+            left_word="a",
+            right_word="b",
+            suffix_max_length=5,
+        )
+        suffix_keys = [k for k in actual if '"suffix_gramset"' in k]
+        assert suffix_keys == [
+            '["suffix_gramset","SG","1","a"]',
+            '["suffix_gramset","SG","2","sa"]',
+            '["suffix_gramset","SG","3","ssa"]',
+            '["suffix_gramset","SG","4","issa"]',
+            '["suffix_gramset","SG","5","kissa"]',
+        ]
+
+    def test_dictionary_affix_values_and_special_states_are_distinct(self):
+        actual = _build_features(
+            language="fi",
+            gramset="SG",
+            word="kissa",
+            left_word="a",
+            right_word="b",
+            affix_values=("", "#", r"\N", "ssa"),
+        )
+        decoded = {tuple(json.loads(key)) for key in actual}
+        assert ("affix_value", "SG", "") in decoded
+        assert ("affix_value", "SG", "ssa") in decoded
+        assert ("affix_status", "SG", "not_stem_remainder") in decoded
+        assert ("affix_status", "SG", "unknown") in decoded
+        assert ("affix_status", "SG", "no_link") not in decoded
+
+    def test_missing_dictionary_link_has_its_own_state(self):
+        actual = _build_features(
+            language="fi",
+            gramset="SG",
+            word="kissa",
+            left_word="a",
+            right_word="b",
+            affix_values=(),
+        )
+        decoded = {tuple(json.loads(key)) for key in actual}
+        assert ("affix_status", "SG", "no_link") in decoded
 
     @pytest.mark.parametrize(
         ("word", "expected"),

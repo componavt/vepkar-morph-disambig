@@ -17,6 +17,7 @@ from commands.benchmark_reports import (
 from commands.build_instances import _run_build_instances
 from commands.compare_t1_runs import _run_compare_t1_runs
 from commands.diagnose_frequency_baseline import _run_diagnose_frequency_baseline
+from commands.diagnose_t1_grid import _run_diagnose_t1_grid
 from commands.evaluate_predictions import (
     run_evaluate_predictions,
     load_ranked_predictions,
@@ -276,6 +277,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Logistic regression inverse regularization strength (default: 1.0)",
     )
     prepare_t1.add_argument(
+        "--suffix-max-length",
+        type=int,
+        default=4,
+        help="Maximum suffix length K; 0 disables surface suffix features (default: 4)",
+    )
+    prepare_t1.add_argument(
+        "--include-affix",
+        action="store_true",
+        help="Add dictionary affix features from dictorpus-data",
+    )
+    prepare_t1.add_argument(
         "--data-dir",
         type=Path,
         default=None,
@@ -309,6 +321,42 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         required=True,
         help="Two or more existing completed T1 run directories (dev split)",
+    )
+    diagnose_t1_grid = commands.add_parser(
+        "diagnose-t1-grid",
+        help="Build the approved per-word dev table for the ten-value T1 C grid",
+        allow_abbrev=False,
+    )
+    diagnose_t1_grid.add_argument(
+        "--run-dirs",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="Ten completed T1.1 run directories covering the approved C grid",
+    )
+    diagnose_t1_grid.add_argument(
+        "--baseline-predictions",
+        type=Path,
+        required=True,
+        help="Validated frequency-baseline dev predictions CSV",
+    )
+    diagnose_t1_grid.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Destination for the uncompressed diagnostics CSV",
+    )
+    diagnose_t1_grid.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="Root of a local dictorpus-data checkout (default: data/dictorpus-data)",
+    )
+    diagnose_t1_grid.add_argument(
+        "--split-file",
+        type=Path,
+        default=None,
+        help="Override the published splits CSV (default: splits for the data tag)",
     )
     return parser
 
@@ -344,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_export_t1_milestone(args)
     if args.command == "compare-t1-runs":
         return _run_compare_t1_runs(args)
+    if args.command == "diagnose-t1-grid":
+        return _run_diagnose_t1_grid(args)
     parser.print_help()
     return 0
 

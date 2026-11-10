@@ -267,7 +267,7 @@ class TestCollectSchema:
             "parameters",
         ]
         assert manifest["format"] == "vepkar-t1-run"
-        assert manifest["format_version"] == 4
+        assert manifest["format_version"] == 5
         assert manifest["stage"] == "prepared"
         assert manifest["data"] == {
             "root": str(data.resolve()),
@@ -278,7 +278,30 @@ class TestCollectSchema:
             "path": str(split.resolve()),
             "sha256": expected_sha256,
         }
-        assert manifest["parameters"] == {"C": 2.5, "target_split": "dev"}
+        assert manifest["parameters"] == {
+            "C": 2.5,
+            "target_split": "dev",
+            "suffix_max_length": 4,
+            "include_affix": False,
+        }
+
+    def test_ablation_parameters_are_recorded(self, tmp_path):
+        data = _tagged_data_repo(tmp_path)
+        split = _split_file(tmp_path)
+        manifest = collect_run_manifest(
+            data_dir=data,
+            data_tag="v2026.09",
+            split_file=split,
+            C=7.0,
+            suffix_max_length=0,
+            include_affix=True,
+        )
+        assert manifest["parameters"] == {
+            "C": 7.0,
+            "target_split": "dev",
+            "suffix_max_length": 0,
+            "include_affix": True,
+        }
 
 
 @pytest.mark.skipif(not GIT_AVAILABLE, reason="Git unavailable")
@@ -358,7 +381,12 @@ class TestPrepareT1RunCommand:
         assert manifest["split"]["sha256"] == hashlib.sha256(
             split.read_bytes()
         ).hexdigest()
-        assert manifest["parameters"] == {"C": 0.5, "target_split": "dev"}
+        assert manifest["parameters"] == {
+            "C": 0.5,
+            "target_split": "dev",
+            "suffix_max_length": 4,
+            "include_affix": False,
+        }
         assert "code" not in manifest
         assert "Data tag: v2026.09" in captured.out
         assert "C: 0.5" in captured.out
@@ -965,10 +993,10 @@ class TestLoadNonMutating:
 class TestLoadVersionRejection:
     @pytest.mark.parametrize(
         "version",
-        [3, 5, "4", 4.0, True],
+        [3, 6, "4", 4.0, True],
         ids=[
             "v3",
-            "v5",
+            "v6",
             "string-four",
             "float-four",
             "boolean",

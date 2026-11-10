@@ -24,6 +24,12 @@ def _run_prepare_t1_run(args: argparse.Namespace) -> int:
         print("error: C must be finite and positive:", file=sys.stderr)
         print(f"  {C!r}", file=sys.stderr)
         return 1
+    suffix_max_length = getattr(args, "suffix_max_length", 4)
+    if type(suffix_max_length) is not int or suffix_max_length < 0:
+        print("error: suffix maximum length must be a nonnegative integer:", file=sys.stderr)
+        print(f"  {suffix_max_length!r}", file=sys.stderr)
+        return 1
+    include_affix = getattr(args, "include_affix", False)
     try:
         config = load_t1_config(
             _PROJECT_ROOT,
@@ -43,6 +49,8 @@ def _run_prepare_t1_run(args: argparse.Namespace) -> int:
         created = create_t1_run(
             config,
             C=C,
+            suffix_max_length=suffix_max_length,
+            include_affix=include_affix,
             run_dir=args.run_dir,
         )
     except T1WorkspaceError as exc:
@@ -66,4 +74,6 @@ def _run_prepare_t1_run(args: argparse.Namespace) -> int:
     print(f"Split file: {manifest['split']['path']}")
     print(f"C: {manifest['parameters']['C']}")
     print(f"Target split: {manifest['parameters']['target_split']}")
+    print(f"Suffix maximum length: {manifest['parameters']['suffix_max_length']}")
+    print(f"Dictionary affix feature: {manifest['parameters']['include_affix']}")
     return 0

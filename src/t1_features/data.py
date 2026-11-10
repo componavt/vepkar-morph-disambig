@@ -1,10 +1,14 @@
 """T1 input preparation: strict split instances with full sentence context."""
 
-from dataclasses import dataclass, replace
+from collections import defaultdict
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
+import pandas as pd
+
 from benchmark_context import BenchmarkContext, load_benchmark_context
+from core.data import DataError, read_corpus_tables
 from core.instances import Instance
 from core.predictions import BenchmarkIntegrityError
 from core.splits import SPLIT_NAMES, SplitError
@@ -19,6 +23,9 @@ class T1Inputs:
     split: Literal["train", "dev", "test"]
     instances: tuple[Instance, ...]
     context_words: tuple[ContextWord, ...]
+    affix_by_candidate: dict[tuple[str, int, int, str], tuple[str, ...]] = field(
+        default_factory=dict
+    )
 
 
 def _split_lookup(
@@ -63,12 +70,69 @@ def _require_unique_word_ids(instances: tuple[Instance, ...]) -> None:
         )
 
 
+def _load_affix_values(
+    data_dir: Path,
+    language: str,
+    instances: tuple[Instance, ...],
+) -> dict[tuple[str, int, int, str], tuple[str, ...]]:
+    """Join dictionary affix values through wordform and gramset IDs."""
+    candidate_keys = {
+        (language, instance.word_id, candidate.wordform_id, candidate.gramset)
+        for instance in instances
+        for candidate in instance.candidates
+        if instance.language == language
+    }
+    if not candidate_keys:
+        return {}
+
+    try:
+        candidates = read_corpus_tables(language, data_dir).candidates
+        candidate_ids = {}
+        for row in candidates.itertuples(index=False):
+            key = (language, int(row.word_id), int(row.wordform_id), str(row.gramset))
+            if key not in candidate_keys:
+                continue
+            if pd.isna(row.gramset_id):
+                continue
+            candidate_ids[key] = str(int(row.gramset_id))
+
+        links_path = data_dir / "dict" / "morphology" / f"lemma_wordforms_{language}.csv.zst"
+        links = pd.read_csv(
+            links_path,
+            compression="zstd",
+            dtype=str,
+            keep_default_na=False,
+            usecols=["wordform_id", "gramset_id", "affix"],
+        )
+    except (OSError, UnicodeDecodeError, pd.errors.ParserError, ValueError) as exc:
+        raise DataError(
+            f"Could not read dictionary affix values for {language}: {exc}"
+        ) from exc
+
+    needed_pairs = {
+        (key[2], gramset_id) for key, gramset_id in candidate_ids.items()
+    }
+    affixes_by_pair: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in links.itertuples(index=False):
+        pair = (str(row.wordform_id), str(row.gramset_id))
+        if pair in needed_pairs:
+            affixes_by_pair[pair].add(str(row.affix))
+
+    result: dict[tuple[str, int, int, str], tuple[str, ...]] = {}
+    for key, gramset_id in candidate_ids.items():
+        pair = (str(key[2]), gramset_id)
+        if pair in affixes_by_pair:
+            result[key] = tuple(sorted(affixes_by_pair[pair]))
+    return result
+
+
 def load_t1_inputs(
     data_dir: Path,
     tag: str,
     *,
     split: Literal["train", "dev", "test"],
     split_file_override: Path | None = None,
+    include_affix: bool = False,
 ) -> T1Inputs:
     """Prepare the strict ``split`` instances and their full sentence context."""
     if split not in TARGET_SPLITS:
@@ -116,6 +180,17 @@ def load_t1_inputs(
                 )
             )
 
+    affix_by_candidate: dict[tuple[str, int, int, str], tuple[str, ...]] = {}
+    if include_affix:
+        for language in sorted({instance.language for instance in selected}):
+            affix_by_candidate.update(
+                _load_affix_values(
+                    data_dir,
+                    language,
+                    selected,
+                )
+            )
+
     return T1Inputs(
         benchmark=replace(benchmark, word_tables=None),
         split=split,
@@ -131,4 +206,5 @@ def load_t1_inputs(
                 ),
             )
         ),
+        affix_by_candidate=affix_by_candidate,
     )

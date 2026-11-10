@@ -140,6 +140,8 @@ def create_t1_run(
     config: T1Config,
     *,
     C: float = 1.0,
+    suffix_max_length: int = 4,
+    include_affix: bool = False,
     run_dir: Path | None = None,
 ) -> Path:
     """Prepare one T1 run directory and publish its passport under it.
@@ -176,6 +178,8 @@ def create_t1_run(
             data_tag=tag,
             split_file=split_path,
             C=C,
+            suffix_max_length=suffix_max_length,
+            include_affix=include_affix,
         )
     except RunManifestError as exc:
         raise T1WorkspaceError(f"cannot collect run manifest: {exc}") from exc

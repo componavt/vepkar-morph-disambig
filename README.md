@@ -75,6 +75,18 @@ A single shared model is trained on the combined `train` split of
 the four language varieties. T1 prediction supports `dev` and `test`;
 `evaluate-t1-run` publishes metrics for `dev`.
 
+Each prepared run records its feature configuration. `--suffix-max-length K`
+adds all surface suffixes from length 1 through `K` (default: 4); `K=0`
+disables surface suffix features for an ablation.
+The later T1 context ablations use a fixed `K=5`, selected as a working setting
+through a `dev` comparison rather than established as a global optimum. The CLI
+default remains 4.
+`--include-affix` adds dictionary `affix` values joined by
+`wordform_id + gramset_id`; multiple linked values are retained. Empty,
+unknown (`\N`), special (`#`), and missing dictionary links have distinct
+feature states. Older version-4 run passports remain readable and use the
+default suffix length 4 without dictionary affix features.
+
 Run the commands from the repository root with the `.venv` environment
 activated, after obtaining the source data.
 

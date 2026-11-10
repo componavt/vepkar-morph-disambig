@@ -157,10 +157,12 @@ class TestAutomaticCreation:
         assert created.name == f"t1.1-C{label}-2026-10-29"
         assert sorted(p.name for p in created.iterdir()) == ["run.json"]
         manifest = load_run_manifest(created / "run.json")
-        assert manifest["format_version"] == 4
+        assert manifest["format_version"] == 5
         assert manifest["stage"] == "prepared"
         assert manifest["parameters"]["C"] == C
         assert manifest["parameters"]["target_split"] == "dev"
+        assert manifest["parameters"]["suffix_max_length"] == 4
+        assert manifest["parameters"]["include_affix"] is False
 
     def test_repeated_creation_same_C_and_date_appends_b_then_c(
         self, tmp_path, monkeypatch

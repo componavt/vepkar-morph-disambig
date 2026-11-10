@@ -54,12 +54,20 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
     data_dir = Path(context.manifest["data"]["root"])
     tag = context.manifest["data"]["tag"]
     split_file = Path(context.manifest["split"]["path"])
+    parameters = context.manifest["parameters"]
+    suffix_max_length = parameters.get("suffix_max_length", 4)
+    include_affix = parameters.get("include_affix", False)
     try:
+        input_options = {
+            "split": split,
+            "split_file_override": split_file,
+        }
+        if include_affix:
+            input_options["include_affix"] = True
         inputs = load_t1_inputs(
             data_dir,
             tag,
-            split=split,
-            split_file_override=split_file,
+            **input_options,
         )
     except DataError:
         return 1
@@ -74,10 +82,17 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
         print(f"error: no {split} word occurrences selected for prediction", file=sys.stderr)
         return 1
     try:
+        feature_options = {}
+        if suffix_max_length != 4:
+            feature_options["suffix_max_length"] = suffix_max_length
+        if include_affix:
+            feature_options["affix_by_candidate"] = inputs.affix_by_candidate
+            feature_options["include_affix"] = True
         examples = build_candidate_examples(
             inputs.instances,
             inputs.context_words,
             mode="predict",
+            **feature_options,
         )
     except FeatureConstructionError as exc:
         print("error: T1 feature construction failed:", file=sys.stderr)
@@ -140,6 +155,8 @@ def _run_predict_t1(args: argparse.Namespace) -> int:
     print(f"Data tag: {tag}")
     print(f"Split file: {inputs.benchmark.split_path}")
     print(f"Split: {split}")
+    print(f"Suffix maximum length: {suffix_max_length}")
+    print(f"Dictionary affix feature: {include_affix}")
     print(f"Predicted word occurrences: {validation.predicted_word_count}")
     print(f"Predicted candidate rows: {validation.predicted_candidate_count}")
     print(f"Output: {output_path}")

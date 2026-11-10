@@ -1,7 +1,7 @@
 import json
 from collections import Counter
 from dataclasses import dataclass
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Mapping
 
 from core.instances import Instance
 
@@ -37,7 +37,12 @@ class CandidateExample:
 def _resolve_context(
     instances: Iterable[Instance],
     context_words: Iterable[ContextWord],
-) -> dict[tuple[str, int], tuple[str, str]]:
+    *,
+    context_window: int = 1,
+) -> dict[
+    tuple[str, int],
+    tuple[tuple[str | None, ...], tuple[str | None, ...]],
+]:
     materialized_instances = list(instances)
     if not materialized_instances:
         return {}
@@ -55,7 +60,10 @@ def _resolve_context(
         if sentence_key in needed_sentences:
             records_by_sentence.setdefault(sentence_key, []).append(record)
 
-    resolved: dict[tuple[str, int], tuple[str, str]] = {}
+    resolved: dict[
+        tuple[str, int],
+        tuple[tuple[str | None, ...], tuple[str | None, ...]],
+    ] = {}
     for sentence_key, targets in instances_by_sentence.items():
         language, sentence_id = sentence_key
         records = records_by_sentence.get(sentence_key, [])
@@ -109,9 +117,29 @@ def _resolve_context(
                     f"word mismatch, expected {target.word!r}, got {match.word!r}"
                 )
             index = position_index[match.word_number]
-            left = records[index - 1].word if index > 0 else "<BOS>"
-            right = records[index + 1].word if index + 1 < len(records) else "<EOS>"
-            resolved[(language, target.word_id)] = (left, right)
+            left_context = []
+            right_context = []
+            for distance in range(1, context_window + 1):
+                left_index = index - distance
+                if left_index >= 0:
+                    left_context.append(records[left_index].word)
+                elif distance == index + 1:
+                    left_context.append("<BOS>")
+                else:
+                    left_context.append(None)
+
+                right_index = index + distance
+                if right_index < len(records):
+                    right_context.append(records[right_index].word)
+                elif distance == len(records) - index:
+                    right_context.append("<EOS>")
+                else:
+                    right_context.append(None)
+
+            resolved[(language, target.word_id)] = (
+                tuple(left_context),
+                tuple(right_context),
+            )
 
     return dict(sorted(resolved.items()))
 
@@ -123,18 +151,83 @@ def _build_features(
     word: str,
     left_word: str,
     right_word: str,
+    left_context: tuple[str | None, ...],
+    right_context: tuple[str | None, ...],
+    include_left_context: bool = True,
+    include_right_context: bool = True,
+    suffix_max_length: int = 4,
+    affix_values: tuple[str, ...] | None = None,
 ) -> dict[str, float]:
+    if type(suffix_max_length) is not int or suffix_max_length < 0:
+        raise FeatureConstructionError(
+            "suffix_max_length must be a nonnegative integer, "
+            f"got {suffix_max_length!r}"
+        )
     features: dict[str, float] = {}
     features[json.dumps(["gramset", gramset], ensure_ascii=False, separators=(",", ":"))] = 1.0
     features[json.dumps(["language", language], ensure_ascii=False, separators=(",", ":"))] = 1.0
     features[json.dumps(["language_gramset", language, gramset], ensure_ascii=False, separators=(",", ":"))] = 1.0
-    features[json.dumps(["left_gramset", gramset, left_word], ensure_ascii=False, separators=(",", ":"))] = 1.0
-    features[json.dumps(["right_gramset", gramset, right_word], ensure_ascii=False, separators=(",", ":"))] = 1.0
+    if len(left_context) != len(right_context):
+        raise FeatureConstructionError(
+            "left and right context windows must have equal lengths"
+        )
+    if not left_context:
+        raise FeatureConstructionError("context window must contain the nearest words")
+    if left_context[0] != left_word or right_context[0] != right_word:
+        raise FeatureConstructionError(
+            "immediate context fields must match the first context-window positions"
+        )
+
+    for side, values, enabled in (
+        ("left", left_context, include_left_context),
+        ("right", right_context, include_right_context),
+    ):
+        if not enabled:
+            continue
+        for distance, context_word in enumerate(values, start=1):
+            if context_word is None:
+                continue
+            if distance == 1:
+                feature = [f"{side}_gramset", gramset, context_word]
+            else:
+                feature = [
+                    f"{side}_gramset_offset",
+                    gramset,
+                    str(distance),
+                    context_word,
+                ]
+            features[
+                json.dumps(feature, ensure_ascii=False, separators=(",", ":"))
+            ] = 1.0
     for element in gramset.split("+"):
         features[json.dumps(["element", element], ensure_ascii=False, separators=(",", ":"))] = 1.0
-    for length in range(1, min(4, len(word)) + 1):
+    for length in range(1, min(suffix_max_length, len(word)) + 1):
         suffix = word[-length:]
         features[json.dumps(["suffix_gramset", gramset, str(length), suffix], ensure_ascii=False, separators=(",", ":"))] = 1.0
+    if affix_values is not None:
+        if not affix_values:
+            features[
+                json.dumps(
+                    ["affix_status", gramset, "no_link"],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            ] = 1.0
+        else:
+            for affix in sorted(set(affix_values)):
+                if affix == "#":
+                    feature = ["affix_status", gramset, "not_stem_remainder"]
+                elif affix == r"\N":
+                    feature = ["affix_status", gramset, "unknown"]
+                else:
+                    feature = ["affix_value", gramset, affix]
+                features[
+                    json.dumps(
+                        feature,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                ] = 1.0
     return dict(sorted(features.items()))
 
 
@@ -143,15 +236,42 @@ def build_candidate_examples(
     context_words: Iterable[ContextWord],
     *,
     mode: Literal["train", "predict"],
+    include_left_context: bool = True,
+    include_right_context: bool = True,
+    context_window: int = 1,
+    suffix_max_length: int = 4,
+    affix_by_candidate: Mapping[
+        tuple[str, int, int, str], tuple[str, ...]
+    ] | None = None,
+    include_affix: bool = False,
 ) -> tuple[CandidateExample, ...]:
     if mode not in ("train", "predict"):
         raise FeatureConstructionError(f"unsupported mode: {mode!r}")
+    if type(include_left_context) is not bool:
+        raise FeatureConstructionError(
+            "include_left_context must be a boolean, "
+            f"got {include_left_context!r}"
+        )
+    if type(include_right_context) is not bool:
+        raise FeatureConstructionError(
+            "include_right_context must be a boolean, "
+            f"got {include_right_context!r}"
+        )
+    if type(context_window) is not int or not 1 <= context_window <= 3:
+        raise FeatureConstructionError(
+            "context_window must be an integer from 1 through 3, "
+            f"got {context_window!r}"
+        )
 
     materialized_instances = list(instances)
     if not materialized_instances:
         return ()
 
-    context = _resolve_context(materialized_instances, context_words)
+    context = _resolve_context(
+        materialized_instances,
+        context_words,
+        context_window=context_window,
+    )
 
     examples: list[CandidateExample] = []
     for instance in materialized_instances:
@@ -169,7 +289,14 @@ def build_candidate_examples(
                     f"gold analysis, found {len(matches)}"
                 )
 
-        left_word, right_word = context[(instance.language, instance.word_id)]
+        left_context, right_context = context[(instance.language, instance.word_id)]
+        left_word = left_context[0]
+        right_word = right_context[0]
+        if left_word is None or right_word is None:
+            raise FeatureConstructionError(
+                f"{instance.language}: word {instance.word_id}: "
+                "nearest context is missing without a boundary marker"
+            )
         for candidate in instance.candidates:
             if mode == "train":
                 label = (
@@ -198,6 +325,28 @@ def build_candidate_examples(
                         word=instance.word,
                         left_word=left_word,
                         right_word=right_word,
+                        left_context=left_context,
+                        right_context=right_context,
+                        include_left_context=include_left_context,
+                        include_right_context=include_right_context,
+                        suffix_max_length=suffix_max_length,
+                        affix_values=(
+                            (
+                                affix_by_candidate.get(
+                                    (
+                                        instance.language,
+                                        instance.word_id,
+                                        candidate.wordform_id,
+                                        candidate.gramset,
+                                    ),
+                                    (),
+                                )
+                                if affix_by_candidate is not None
+                                else ()
+                            )
+                            if include_affix
+                            else None
+                        ),
                     ),
                     label=label,
                     sample_weight=sample_weight,

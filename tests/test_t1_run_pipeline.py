@@ -262,7 +262,7 @@ class TestT1RunPipeline:
 
         manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         assert manifest["format"] == "vepkar-t1-run"
-        assert manifest["format_version"] == 4
+        assert manifest["format_version"] == 5
         assert "code" not in manifest
         assert manifest["data"]["root"] == str(data.resolve())
         assert manifest["data"]["tag"] == _TAG
@@ -274,7 +274,12 @@ class TestT1RunPipeline:
         assert manifest["split"]["sha256"] == hashlib.sha256(
             split_file.read_bytes()
         ).hexdigest()
-        assert manifest["parameters"] == {"C": 0.1, "target_split": "dev"}
+        assert manifest["parameters"] == {
+            "C": 0.1,
+            "target_split": "dev",
+            "suffix_max_length": 4,
+            "include_affix": False,
+        }
 
         passport_bytes = (run_dir / "run.json").read_bytes()
 
