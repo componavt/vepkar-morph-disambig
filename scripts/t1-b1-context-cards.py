@@ -19,7 +19,7 @@ from core.data import read_words  # noqa: E402
 
 A1_DIR = ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v5"
 DATA_DIR = ROOT / "data/dictorpus-data"
-DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-context-cards-b1-v4"
+DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-context-cards-b1-v6"
 LANGUAGES = ("vep", "krl", "olo", "lud")
 PILOT_LANGUAGES = ("vep", "krl", "olo")
 FAMILIES = {
@@ -36,6 +36,7 @@ FAMILIES = {
     ),
 }
 CONTEXT_LEVELS = ("K0", "K1", "K2", "K3", "FULL")
+STATUSES = {"analyses_selected", "insufficient_context", "none_applicable", "data_problem"}
 
 
 class B1InputError(ValueError):
@@ -430,6 +431,8 @@ def prepare_pilot(
             gramsets = sorted({row["gramset"] for row in full_candidates})
             if len(gramsets) < 2:
                 raise B1InputError(f"target has fewer than two gramsets: {target['word_id']}")
+            if len(gramsets) > 26:
+                raise B1InputError(f"too many distinct gramsets for lettered options: {target['word_id']}")
             option_map = {gramset: chr(ord("A") + i) for i, gramset in enumerate(gramsets)}
             target["neutral_options"] = option_map
             target["candidate_keys_internal"] = sorted(
@@ -458,8 +461,13 @@ def prepare_pilot(
                         f"{letter}:{gramset}" for gramset, letter in option_map.items()
                     ),
                 })
+            spans = {
+                level: _context_span(level, index, len(token_rows))
+                for level in CONTEXT_LEVELS
+            }
+            repeat_meta = repeated_context_levels(spans)
             for level in CONTEXT_LEVELS:
-                token_span = _context_span(level, index, len(token_rows))
+                token_span = spans[level]
                 is_full = token_span == (0, len(token_rows) - 1)
                 context_rows.append(
                     {
@@ -469,6 +477,9 @@ def prepare_pilot(
                         "text_id": text_id,
                         "sentence_id": sentence_id,
                         "level": level,
+                        "span_start": token_span[0],
+                        "span_end": token_span[1],
+                        **repeat_meta[level],
                         "token_count": token_span[1] - token_span[0] + 1,
                         "same_as_full_sentence": int(is_full),
                         "context_text": _render_tokens(
@@ -500,6 +511,112 @@ def _context_span(level: str, index: int, token_count: int) -> tuple[int, int]:
     return (max(0, index - window), min(token_count - 1, index + window))
 
 
+def repeated_context_levels(level_spans: dict[str, tuple[int, int]]) -> dict[str, dict]:
+    first_level_by_span = {}
+    result = {}
+    for level in CONTEXT_LEVELS:
+        span = level_spans[level]
+        repeat_of = first_level_by_span.get(span)
+        result[level] = {
+            "repeat_of_level": repeat_of or "",
+            "requires_new_answer": int(repeat_of is None),
+        }
+        if repeat_of is None:
+            first_level_by_span[span] = level
+    return result
+
+
+def validate_response(response: dict, allowed_options: set[str]) -> None:
+    status = response.get("status")
+    selected = response.get("selected_options", [])
+    if status not in STATUSES:
+        raise ValueError("unknown response status")
+    if len(selected) != len(set(selected)):
+        raise ValueError("duplicate selected options")
+    if not set(selected) <= allowed_options:
+        raise ValueError("unknown option code")
+    if status == "analyses_selected" and not selected:
+        raise ValueError("selected analyses status requires at least one option")
+    if status != "analyses_selected" and selected:
+        raise ValueError("special status must not contain selected analyses")
+
+
+def assign_primary_targets(target_rows: list[dict]) -> list[dict]:
+    """Mark one deterministic primary target per sentence and link controls."""
+    by_sentence = defaultdict(list)
+    for row in target_rows:
+        by_sentence[(row["language"], row["text_id"], row["sentence_id"])].append(row)
+
+    controls_by_pair = defaultdict(list)
+    for row in target_rows:
+        if row["gramset_correct"]:
+            for pair in row["selection_pair"].split(";"):
+                if pair:
+                    controls_by_pair[pair].append(row)
+
+    control_links = []
+    for row in target_rows:
+        pairs = [pair for pair in row["selection_pair"].split(";") if pair]
+        controls = {} if row["gramset_correct"] else {
+            control["target_id"]: control
+            for pair in pairs
+            for control in controls_by_pair[pair]
+            if control["target_id"] != row["target_id"]
+        }
+        same_form = sorted(
+            (control for control in controls.values() if control["normalized_form"] == row["normalized_form"]),
+            key=lambda control: (control["language"], control["text_id"], control["sentence_id"], control["target_position"], control["word_id"]),
+        )
+        other_form = sorted(
+            (control for control in controls.values() if control["normalized_form"] != row["normalized_form"]),
+            key=lambda control: (control["language"], control["text_id"], control["sentence_id"], control["target_position"], control["word_id"]),
+        )
+        if row["gramset_correct"]:
+            quality, linked = "not_applicable_control_target", []
+        elif same_form:
+            quality, linked = "same_form_control", same_form
+        elif other_form:
+            quality, linked = "same_contrast_other_form_control", other_form
+        else:
+            quality, linked = "no_control", []
+        row["control_quality"] = quality
+        row["control_target_ids_internal"] = ";".join(control["target_id"] for control in linked)
+        for control in linked:
+            control_links.append({
+                "target_id": row["target_id"],
+                "control_target_id": control["target_id"],
+                "control_quality": quality,
+                "same_form": int(control["normalized_form"] == row["normalized_form"]),
+                "contrast": ";".join(pairs),
+            })
+
+    for sentence_rows in by_sentence.values():
+        def primary_key(row):
+            is_error = row["gramset_correct"] == 0
+            has_same_form_control = (
+                row["gramset_correct"] == 0
+                and row["control_quality"] == "same_form_control"
+            )
+            return (not is_error, not has_same_form_control, row["target_position"], row["word_id"])
+
+        primary = min(sentence_rows, key=primary_key)
+        for row in sentence_rows:
+            row["is_primary_target"] = int(row is primary)
+            if row is primary:
+                if row["gramset_correct"] == 0 and row["control_quality"] == "same_form_control":
+                    reason = "error_target_with_same_form_control"
+                elif row["gramset_correct"] == 0:
+                    reason = "error_target; no same-form control"
+                elif row["control_quality"] == "same_form_control":
+                    reason = "gramset-correct target with same-form control; no error target in sentence"
+                else:
+                    reason = "first stable target; no error target in sentence"
+            else:
+                reason = "additional target retained internally; excluded from staged context judgments"
+            row["primary_selection_reason"] = reason
+    return control_links
+
+
 def _render_tokens(
     token_rows: list[dict], span: tuple[int, int], marks: dict[int, str]
 ) -> str:
@@ -525,105 +642,96 @@ def write_csv(path: Path, rows: list[dict], fields: tuple[str, ...]) -> None:
         writer.writerows(rows)
 
 
-def write_markdown(output_dir: Path, cards: list[dict], target_rows: list[dict]) -> None:
+def write_markdown(
+    output_dir: Path,
+    cards: list[dict],
+    target_rows: list[dict],
+    context_rows: list[dict],
+    questionnaire_root: Path,
+) -> None:
     internal = [
-        "# B1: внутренняя версия контекстного пилота",
-        "",
-        "Черновик для исследовательской команды. Не предъявлять экспертам в таком виде.",
-        "Контекст собран из токенов `dictorpus-data v2026.11`, отсортированных по `word_number`; написание и исходная пунктуация предложения не восстанавливались.",
-        "Решения модели заморожены в A1-v5. `gramset_correct` относится к грамсету; полная правильность требует совпадения `(wordform_id, gramset)`. ",
-        "",
+        "# B1: внутренняя версия контекстного пилота", "",
+        "Внутренний материал; экспертам не предъявлять.",
+        "Контекст — последовательность значений `word` из экспортных таблиц `words_<language>.csv.zst`, отсортированная по `word_number`. Исходная пунктуация и регистр не восстанавливаются.",
+        "Разборы дедуплицированы по грамсету только для предъявления грамсетного вопроса; все ключи `(wordform_id, gramset)` сохранены.",
+        "Совпадение грамсета не означает совпадение полного кандидата.", "",
     ]
     neutral_by_level = {
         (language, level): [
-            f"# B1: нейтральные карточки `{language}`, этап {level}",
-            "",
-            "Показывать только этот файл на текущем этапе. Зафиксировать ответ до открытия следующего уровня контекста.",
-            "Варианты грамсетов не ранжированы. Кандидаты с одинаковым грамсетом объединены только для грамсетного вопроса; полный список ключей сохранён во внутренней таблице.",
-            "",
+            f"# Контекстный опросник B1 — `{language}`, {level}", "",
+            "Пожалуйста, заполните этот этап и сохраните ответы до получения следующего файла. Не ищите исходный текст во внешних источниках.",
+            "Для каждой карточки укажите один или несколько допустимых разборов либо один специальный статус. Комментарий необязателен.", "",
         ]
         for language in PILOT_LANGUAGES
         for level in CONTEXT_LEVELS
     }
+    contexts_by_target_level = {
+        (row["target_id"], row["level"]): row for row in context_rows
+    }
     targets_by_sentence = defaultdict(list)
     for row in target_rows:
         targets_by_sentence[(row["language"], row["text_id"], row["sentence_id"])].append(row)
+
     for card in cards:
         language = card["language"]
         key = (language, card["text_id"], card["sentence_id"])
-        targets = sorted(targets_by_sentence[key], key=lambda row: row["target_position"])
-        internal.extend(
-            [
-                f"## {card['card_id']} — `{language}` · text `{card['text_id']}` · sentence `{card['sentence_id']}`",
-                "",
-                f"Полная последовательность токенов: {_render_tokens(card['token_rows'], (0, len(card['token_rows']) - 1), card['marked_indices'])}",
-                "",
-            ]
-        )
+        targets = sorted(targets_by_sentence[key], key=lambda row: (row["target_position"], row["word_id"]))
+        primary = next(row for row in targets if row["is_primary_target"])
+        internal.extend([
+            f"## {card['card_id']} — `{language}` · text `{card['text_id']}` · sentence `{card['sentence_id']}`", "",
+            f"Полная последовательность экспортных токенов: {_render_tokens(card['token_rows'], (0, len(card['token_rows']) - 1), card['marked_indices'])}", "",
+        ])
         for target in targets:
-            internal.extend(
-                [
-                    f"### {target['target_id']} — {target['normalized_form']}",
-                    "",
-                    "Внутренний отбор: " + "; ".join(
-                        f"`{p['selection_family']}`, контраст `{p['selection_pair']}`, роль `{p['internal_role']}`"
-                        for p in target["selection_provenance"]
-                    ) + ".",
-                    f"Gold `{target['gold_gramset']}` / `{target['gold_wordform_id']}`; Top-1 `{target['top1_gramset']}` / `{target['top1_wordform_id']}`; совпадение грамсета={target['gramset_correct']}, полного кандидата={target['full_candidate_correct']}.",
-                    "Кандидатные ключи: " + ", ".join(
-                        f"`{item}`" for item in target["candidate_keys_internal"].split(";")
-                    ),
-                    "",
-                ]
-            )
+            internal.extend([
+                f"### {target['target_id']} — {target['normalized_form']}", "",
+                f"Основная цель: {bool(target['is_primary_target'])}. Причина: {target['primary_selection_reason']}.",
+                "Внутренний отбор: " + "; ".join(
+                    f"`{p['selection_family']}`, контраст `{p['selection_pair']}`, роль `{p['internal_role']}`"
+                    for p in target["selection_provenance"]
+                ) + ".",
+                f"Gold `{target['gold_gramset']}` / `{target['gold_wordform_id']}`; Top-1 `{target['top1_gramset']}` / `{target['top1_wordform_id']}`; совпадение грамсета={target['gramset_correct']}, полного кандидата={target['full_candidate_correct']}.",
+                f"Качество контроля: `{target['control_quality']}`; связанные контрольные цели: `{target['control_target_ids_internal']}`.",
+                "Кандидатные ключи: " + ", ".join(f"`{item}`" for item in target["candidate_keys_internal"].split(";")), "",
+            ])
         for level in CONTEXT_LEVELS:
             neutral = neutral_by_level[(language, level)]
-            neutral.extend([f"## {card['card_id']} — `{language}`", ""])
-            context_map = {
-                row["target_id"]: row
-                for row in [
-                    c for c in _context_rows_for_card(card, target_rows, level)
-                ]
-            }
-            for target in targets:
-                context = context_map[target["target_id"]]
-                neutral.append(f"### {target['target_id']}")
-                neutral.append("")
-                neutral.append(context["context_text"])
-                if context["same_as_full_sentence"] and level != "FULL":
-                    neutral.append(f"\n_(Окно {level} уже охватывает всё предложение.)_")
-                neutral.append("")
-                neutral.append("Варианты: " + " · ".join(
-                    f"**{letter}.** `{gramset}`"
-                    for gramset, letter in sorted(
-                        target["neutral_options"].items(), key=lambda item: item[1]
-                    )
-                ))
-                neutral.append("")
-                neutral.append("Ответ: один или несколько вариантов; недостаточно контекста; ни один вариант; проблема текста; требуется более широкий контекст.")
-                neutral.append("Уверенность: высокая / средняя / низкая. Краткое основание: ______")
-                neutral.append("")
-            neutral.append("---\n")
+            context = contexts_by_target_level[(primary["target_id"], level)]
+            neutral.extend([
+                f"## {primary['target_id']}", "",
+                f"Целевая словоформа: **{primary['normalized_form']}**", "",
+                f"Контекст: {context['context_text']}", "",
+            ])
+            if context["repeat_of_level"]:
+                neutral.extend([
+                    f"Этот фрагмент совпадает с ранее показанным уровнем {context['repeat_of_level']}; новых слов он не добавляет. Повторный ответ не требуется.", "", "---", "",
+                ])
+                continue
+            if context["same_as_full_sentence"] and level != "FULL":
+                neutral.extend([f"Уровень {level} уже охватывает всю последовательность экспортных токенов предложения.", ""])
+            options = sorted(primary["neutral_options"].items(), key=lambda item: item[1])
+            neutral.append("### Варианты")
+            neutral.append("")
+            neutral.extend(f"- **{letter}.** `{primary['normalized_form']}` — `{gramset}`" for gramset, letter in options)
+            neutral.extend([
+                "", "### Ответ", "",
+                "Статус (отметьте один):", 
+                "- [ ] Выбраны допустимые разборы",
+                "- [ ] Недостаточно контекста",
+                "- [ ] Ни один вариант не подходит",
+                "- [ ] Проблема текста или данных",
+                "",
+                "Коды выбранных вариантов (A; B; ...; только если выбран первый статус): ______",
+                "Комментарий (необязательно): ______", "", "---", "",
+            ])
     (output_dir / "internal-cards.md").write_text("\n".join(internal) + "\n", encoding="utf-8")
+    questionnaire_root.mkdir(parents=True, exist_ok=True)
     for (language, level), lines in neutral_by_level.items():
-        (output_dir / f"neutral-{language}-{level.lower()}.md").write_text(
-            "\n".join(lines) + "\n", encoding="utf-8"
-        )
-    protocol = """# Проект протокола B1
-
-Цель пилота — выяснить, на каком предъявленном уровне контекста эксперт может обосновать грамсетное суждение для доступных альтернатив. Это целевой пилот диагностических случаев, а не репрезентативная оценка языка или корпуса.
-
-## Последовательность предъявления
-
-1. Для выбранного языка предъявлять только соответствующий файл `neutral-<язык>-k0.md`; до следующего этапа записать ответ, уверенность и фрагмент, на который эксперт опирался.
-2. Затем по порядку открыть файлы этого же языка для K1, K2, K3 и FULL. На каждом этапе сохранять ответ до просмотра следующего уровня; изменения ответа записывать отдельно, не затирать прежние решения.
-3. Разрешены несколько допустимых грамсетов, «недостаточно контекста», «ни один вариант», замечание о качестве текста и просьба о более широком фрагменте. Не требовать единственного выбора.
-4. Порядок вариантов определяется грамсетом и одинаков во всех уровнях одной цели; он не связан с rank или score модели.
-5. Одинаковые текстовые окна отмечаются. Окна остаются внутри предложения; соседнее предложение в этом пилоте не подмешивается.
-
-Нейтральные файлы — только макеты. До предъявления нужно согласовать формулировки на соответствующем языке, способ выделения целей и удобство полей ответа. Экспертам материалы не отправлялись.
-"""
-    (output_dir / "protocol-draft.md").write_text(protocol, encoding="utf-8")
+        content = "\n".join(lines).rstrip() + "\n"
+        filename = f"{level.lower()}.md"
+        (output_dir / f"neutral-{language}-{filename}").write_text(content, encoding="utf-8")
+        language_dir = questionnaire_root / language
+        language_dir.mkdir(parents=True, exist_ok=True)
+        (language_dir / filename).write_text(content, encoding="utf-8")
 
 
 def _context_rows_for_card(card: dict, target_rows: list[dict], level: str) -> list[dict]:
@@ -645,7 +753,7 @@ def _context_rows_for_card(card: dict, target_rows: list[dict], level: str) -> l
     return result
 
 
-def run(a1_dir: Path, data_dir: Path, output_dir: Path) -> dict:
+def run(a1_dir: Path, data_dir: Path, output_dir: Path, questionnaire_root: Path) -> dict:
     if output_dir.exists() or output_dir.is_symlink():
         raise B1InputError(f"refusing to overwrite existing output directory: {output_dir}")
     summary, a1_hashes = verify_a1_inputs(a1_dir)
@@ -659,6 +767,7 @@ def run(a1_dir: Path, data_dir: Path, output_dir: Path) -> dict:
         needed_sentences[row["language"]].add(row["sentence_id"])
     contexts, word_hashes = load_word_contexts(summary, data_dir, needed_sentences)
     cards, target_rows, context_rows = prepare_pilot(selected, instances, candidates, contexts)
+    control_links = assign_primary_targets(target_rows)
 
     output_dir.mkdir(parents=True)
     fields_registry = (
@@ -670,7 +779,8 @@ def run(a1_dir: Path, data_dir: Path, output_dir: Path) -> dict:
         "card_id", "target_id", "language", "text_id", "sentence_id", "word_id", "normalized_form",
         "target_position", "selection_family", "selection_pair", "internal_role", "gold_gramset",
         "top1_gramset", "gramset_correct", "full_candidate_correct", "candidate_keys_internal",
-        "neutral_option_map_internal",
+        "neutral_option_map_internal", "is_primary_target", "primary_selection_reason",
+        "control_quality", "control_target_ids_internal",
     )
     write_csv(output_dir / "opportunity-register.csv", registry, fields_registry)
     write_csv(
@@ -683,11 +793,16 @@ def run(a1_dir: Path, data_dir: Path, output_dir: Path) -> dict:
     )
     write_csv(output_dir / "selected-targets-internal.csv", target_rows, fields_selected)
     write_csv(
+        output_dir / "control-links-internal.csv",
+        control_links,
+        ("target_id", "control_target_id", "control_quality", "same_form", "contrast"),
+    )
+    write_csv(
         output_dir / "context-views-internal.csv",
         context_rows,
-        ("card_id", "target_id", "language", "text_id", "sentence_id", "level", "token_count", "same_as_full_sentence", "context_text"),
+        ("card_id", "target_id", "language", "text_id", "sentence_id", "level", "span_start", "span_end", "repeat_of_level", "requires_new_answer", "token_count", "same_as_full_sentence", "context_text"),
     )
-    write_markdown(output_dir, cards, target_rows)
+    write_markdown(output_dir, cards, target_rows, context_rows, questionnaire_root)
 
     errors_by_family = Counter()
     opportunities_by_family = Counter()
@@ -703,8 +818,8 @@ def run(a1_dir: Path, data_dir: Path, output_dir: Path) -> dict:
         "source_prediction_sha256": summary["prediction_source"]["sha256"],
         "source_split": "dev",
         "context_definition": "K0 target only; K1/K2/K3 token windows by word_id and word_number; FULL all word-table tokens in the sentence",
-        "context_token_source": "dictorpus-data v2026.11 words_<language>.csv.zst; sorted by word_number; no punctuation restoration",
-        "selection_unit": "sentence with one or more individually identified targets",
+        "context_token_source": "full sequence of exported words_<language>.csv.zst `word` values sorted by word_number; not a recovered original sentence string; punctuation/capitalization are not restored",
+        "selection_unit": "one primary target per sentence for staged context judgments; additional targets remain internal",
         "selection_is_purposive": True,
         "selection_summary": selection_summary,
         "lud_deferred_candidate_count": len(lud_deferred),
@@ -718,7 +833,16 @@ def run(a1_dir: Path, data_dir: Path, output_dir: Path) -> dict:
         },
         "sentence_count": len(cards),
         "target_count": len(target_rows),
+        "primary_target_count": sum(row["is_primary_target"] for row in target_rows),
+        "additional_internal_target_count": sum(not row["is_primary_target"] for row in target_rows),
         "context_view_count": len(context_rows),
+        "unique_primary_context_response_count": sum(
+            row["target_id"] in {
+                target["target_id"] for target in target_rows if target["is_primary_target"]
+            }
+            and row["requires_new_answer"]
+            for row in context_rows
+        ),
         "context_levels": list(CONTEXT_LEVELS),
         "lud_expert_status": "no expert currently assigned; registry retained, no expert pilot cards prepared",
         "test_used": False,
@@ -739,9 +863,15 @@ def main() -> int:
     parser.add_argument("--a1-dir", type=Path, default=A1_DIR)
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--questionnaire-root", type=Path, default=ROOT / "pclaude/experts/questionnaires")
     args = parser.parse_args()
     try:
-        summary = run(args.a1_dir.resolve(), args.data_dir.resolve(), args.output_dir.resolve())
+        summary = run(
+            args.a1_dir.resolve(),
+            args.data_dir.resolve(),
+            args.output_dir.resolve(),
+            args.questionnaire_root.resolve(),
+        )
     except (B1InputError, OSError, ValueError) as exc:
         parser.error(str(exc))
     print(json.dumps(summary, ensure_ascii=False, indent=2))

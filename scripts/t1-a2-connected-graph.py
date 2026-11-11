@@ -21,7 +21,7 @@ from matplotlib.path import Path as MplPath
 
 ROOT = Path(__file__).resolve().parents[1]
 A1_DIR = ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v5"
-DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-error-analysis-a2-v9"
+DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-error-analysis-a2-v12"
 GRAMSETS = ("SG+GEN", "SG+ACC", "SG+NOM", "PL+NOM", "PL+ACC")
 PAIRS = (
     ("SG+ACC", "SG+NOM"),
@@ -40,8 +40,8 @@ POSITIONS = {
 GOLD_COLOR = "#B58A25"
 MODEL_COLOR = "#476B8F"
 RIBBON_COLOR = "#34495E"
-AREA_BASE = math.pi * 0.42**2
-AREA_COEFFICIENT = 0.35
+MIN_NODE_RADIUS = 0.58
+MAX_TO_MIN_NODE_AREA = 3.0
 MAX_RIBBON_WIDTH = 4.2
 
 
@@ -224,9 +224,27 @@ def summary_count(instances: list, category: str) -> int:
     raise ValueError(category)
 
 
-def node_radius(count: int, contrast: int) -> float:
-    area = AREA_BASE + contrast * AREA_COEFFICIENT * math.log1p(count)
-    return math.sqrt(area / math.pi)
+def node_area(count: int, minimum: int, maximum: int) -> float:
+    """Map log-counts to a shared, bounded area range for all node rings."""
+    minimum_area = math.pi * MIN_NODE_RADIUS**2
+    maximum_area = minimum_area * MAX_TO_MIN_NODE_AREA
+    if maximum <= minimum:
+        return minimum_area
+    value = (math.log1p(count) - math.log1p(minimum)) / (
+        math.log1p(maximum) - math.log1p(minimum)
+    )
+    value = min(1.0, max(0.0, value))
+    return minimum_area + (maximum_area - minimum_area) * value
+
+
+def node_radius(count: int, minimum: int, maximum: int) -> float:
+    return math.sqrt(node_area(count, minimum, maximum) / math.pi)
+
+
+def format_percent(rate: float) -> str:
+    percent = rate * 100
+    decimals = 2 if 0 < percent < 1 else 1
+    return f"{percent:.{decimals}f}".replace(".", ",") + "%"
 
 
 def cubic_points(source: tuple[float, float], target: tuple[float, float], curve: float, source_radius: float, target_radius: float):
@@ -266,11 +284,11 @@ def bezier_derivative(points, t: float) -> tuple[float, float]:
     )
 
 
-def draw_contour_edge(ax, source, target, r_source, r_target, row):
+def draw_contour_edge(ax, source, target, r_source, r_target, row, max_count):
     count = row["selected_error_count"]
     if not count:
         return
-    width = MAX_RIBBON_WIDTH * count / 41.0
+    width = MAX_RIBBON_WIDTH * count / max_count
     # Reversing the endpoints mirrors a positive curve onto the opposite side.
     points = cubic_points(source, target, 0.22, r_source, r_target)
     codes = (MplPath.MOVETO, MplPath.CURVE4, MplPath.CURVE4, MplPath.CURVE4)
@@ -284,8 +302,8 @@ def draw_contour_edge(ax, source, target, r_source, r_target, row):
             arrow_start,
             arrow_end,
             arrowstyle="-|>",
-            mutation_scale=10,
-            linewidth=0.9,
+            mutation_scale=20,
+            linewidth=1.5,
             edgecolor=RIBBON_COLOR,
             facecolor="white",
             zorder=3,
@@ -294,7 +312,7 @@ def draw_contour_edge(ax, source, target, r_source, r_target, row):
     return points
 
 
-def draw_network(node_rows: list[dict], edge_rows: list[dict], output: Path, *, contrast: int, dual: bool = False, partition_labels: bool = False) -> None:
+def draw_network(node_rows: list[dict], edge_rows: list[dict], output: Path, *, dual: bool = False, partition_labels: bool = False) -> None:
     nodes = {row["gramset"]: row for row in node_rows}
     fig, ax = plt.subplots(figsize=(13.6, 9.2))
     ax.set_aspect("equal")
@@ -302,10 +320,22 @@ def draw_network(node_rows: list[dict], edge_rows: list[dict], output: Path, *, 
     ax.set_xlim(-6.8, 6.8)
     ax.set_ylim(-5.0, 4.8)
 
-    gold_radii = {g: node_radius(nodes[g]["gold_instance_count"], contrast) for g in GRAMSETS}
-    model_radii = {g: node_radius(nodes[g]["top1_prediction_count"], contrast) for g in GRAMSETS}
+    all_counts = [
+        count
+        for row in node_rows
+        for count in (row["gold_instance_count"], row["top1_prediction_count"])
+    ]
+    minimum_count, maximum_count = min(all_counts), max(all_counts)
+    gold_radii = {
+        g: node_radius(nodes[g]["gold_instance_count"], minimum_count, maximum_count)
+        for g in GRAMSETS
+    }
+    model_radii = {
+        g: node_radius(nodes[g]["top1_prediction_count"], minimum_count, maximum_count)
+        for g in GRAMSETS
+    }
     outer_radii = {
-        g: max(gold_radii[g], model_radii[g]) + (0.16 if dual else 0.0)
+        g: (max(gold_radii[g], model_radii[g]) + 0.16) if dual else gold_radii[g]
         for g in GRAMSETS
     }
     label_positions = {
@@ -319,9 +349,10 @@ def draw_network(node_rows: list[dict], edge_rows: list[dict], output: Path, *, 
         ("PL+NOM", "PL+ACC"): (4.95, -1.20),
         ("PL+ACC", "PL+NOM"): (3.25, -1.20),
     }
-    if contrast >= 3:
-        label_positions[("SG+ACC", "SG+NOM")] = (-2.20, -0.85)
-        label_positions[("SG+NOM", "SG+ACC")] = (-2.20, -1.85)
+    max_edge_count = max(
+        (row["selected_error_count"] for row in edge_rows if row["displayed"]),
+        default=1,
+    )
     for row in edge_rows:
         source, target = row["gold_gramset"], row["alternative_gramset"]
         if not row["displayed"]:
@@ -333,9 +364,10 @@ def draw_network(node_rows: list[dict], edge_rows: list[dict], output: Path, *, 
             outer_radii[source],
             outer_radii[target],
             row,
+            max_edge_count,
         )
         label_x, label_y = label_positions[(source, target)]
-        label = f"{row['selected_error_count']} / {row['opportunity_count']} · {row['selected_error_rate']*100:.1f}%"
+        label = f"{row['selected_error_count']} / {row['opportunity_count']} · {format_percent(row['selected_error_rate'])}"
         ax.text(
             label_x,
             label_y,
@@ -361,24 +393,25 @@ def draw_network(node_rows: list[dict], edge_rows: list[dict], output: Path, *, 
                     model_radii[gramset],
                     facecolor="none",
                     edgecolor=MODEL_COLOR,
-                    linewidth=1.7,
-                    linestyle=(0, (4, 2)),
+                    linewidth=2.6,
+                    linestyle=(0, (5, 2.5)),
                     zorder=5.2,
                 )
             )
             if partition_labels:
-                label = (
-                    f"{gramset}\nG-only {row['gold_only_count']} · same {row['same_gramset_count']}\n"
-                    f"P-only {row['prediction_only_count']}"
-                )
-                fontsize = 8.0
+                label_box = {"facecolor": "white", "edgecolor": "none", "alpha": 0.94, "pad": 0.5}
+                ax.text(center[0], center[1] + 0.30, gramset, ha="center", va="center", fontsize=8.0, bbox=label_box, zorder=6)
+                ax.text(center[0], center[1] + 0.12, f"Gold {row['gold_instance_count']} · Top-1 {row['top1_prediction_count']}", ha="center", va="center", fontsize=6.4, bbox=label_box, zorder=6)
+                ax.text(center[0], center[1] - 0.06, f"Gold-only {row['gold_only_count']}", color=GOLD_COLOR, ha="center", va="center", fontsize=6.8, bbox=label_box, zorder=6)
+                ax.text(center[0], center[1] - 0.23, f"Совпало {row['same_gramset_count']}", color="#444444", ha="center", va="center", fontsize=6.8, bbox=label_box, zorder=6)
+                ax.text(center[0], center[1] - 0.40, f"Top-1-only {row['prediction_only_count']}", color=MODEL_COLOR, ha="center", va="center", fontsize=6.8, bbox=label_box, zorder=6)
             else:
                 label = (
                     f"{gramset}\nG={row['gold_instance_count']} · P={row['top1_prediction_count']}\n"
                     f"same={row['same_gramset_count']}"
                 )
                 fontsize = 8.6
-            ax.text(*center, label, ha="center", va="center", fontsize=fontsize, zorder=6)
+                ax.text(*center, label, ha="center", va="center", fontsize=fontsize, zorder=6)
         else:
             ax.add_patch(Circle(center, gold_radius, facecolor="white", edgecolor=GOLD_COLOR, linewidth=2.1, zorder=5))
             ax.text(
@@ -392,15 +425,14 @@ def draw_network(node_rows: list[dict], edge_rows: list[dict], output: Path, *, 
 
     ax.set_title("Связный граф выбранных грамсетных ошибок на dev", fontsize=15, pad=16)
     if dual and partition_labels:
-        footer = "Контуры: gold и Top-1. Внутри: gold-only · совпало по грамсету · Top-1-only; перекрытие контуров схематично."
+        footer = "Золотой контур — текущий gold; синий пунктир — Top-1. Gold-only / Совпало / Top-1-only — разложение по грамсету; смещение контуров схематично."
     elif dual:
         footer = "Золотой контур — текущий gold; синий пунктир — Top-1. Числа G/P/same точны; площади и перекрытие контуров схематичны."
     else:
         footer = "Размер вершины: площадь по логарифмической шкале числа gold-употреблений. Контурная лента: число ошибок; подпись: ошибки / возможности · доля."
     fig.text(0.5, 0.04, footer, ha="center", va="bottom", fontsize=9.5)
     fig.subplots_adjust(top=0.92, bottom=0.11)
-    for extension in ("png", "svg", "pdf"):
-        fig.savefig(output.with_suffix(f".{extension}"), dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -458,8 +490,7 @@ def draw_exact_venn(node_rows: list[dict], output: Path) -> None:
     fig.suptitle("Gold и Top-1 по отдельным грамсетам: точные пересечения", fontsize=15, y=0.98)
     fig.text(0.5, 0.025, "Площадь круга пропорциональна числу употреблений; площадь пересечения — числу совпадений по грамсету. Масштаб общий.", ha="center", fontsize=9.5)
     fig.subplots_adjust(top=0.91, bottom=0.10, hspace=0.28, wspace=0.08)
-    for extension in ("png", "svg", "pdf"):
-        fig.savefig(output.with_suffix(f".{extension}"), dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -498,12 +529,20 @@ def draw_exact_overlap_network(node_rows: list[dict], edge_rows: list[dict], out
         if not row["displayed"]:
             continue
         source, target = row["gold_gramset"], row["alternative_gramset"]
-        draw_contour_edge(ax, POSITIONS[source], POSITIONS[target], extents[source], extents[target], row)
+        draw_contour_edge(
+            ax,
+            POSITIONS[source],
+            POSITIONS[target],
+            extents[source],
+            extents[target],
+            row,
+            max(1, max(item["selected_error_count"] for item in edge_rows)),
+        )
         label_x, label_y = label_positions[(source, target)]
         ax.text(
             label_x,
             label_y,
-            f"{row['selected_error_count']} / {row['opportunity_count']} · {row['selected_error_rate']*100:.1f}%",
+            f"{row['selected_error_count']} / {row['opportunity_count']} · {format_percent(row['selected_error_rate'])}",
             ha="center",
             va="center",
             fontsize=8.5,
@@ -556,8 +595,7 @@ def draw_exact_overlap_network(node_rows: list[dict], edge_rows: list[dict], out
         fontsize=9.2,
     )
     fig.subplots_adjust(top=0.92, bottom=0.11)
-    for extension in ("png", "svg", "pdf"):
-        fig.savefig(output.with_suffix(f".{extension}"), dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -587,8 +625,7 @@ def draw_partition_matrix(node_rows: list[dict], output: Path) -> None:
     ax.legend(ncol=3, loc="lower right", frameon=False)
     fig.text(0.5, 0.015, "Gold-only = gold-грамсет не выбран Top-1; совпало = совпадение грамсета; Top-1-only = модель выбрала грамсет при другом gold.", ha="center", fontsize=9)
     fig.subplots_adjust(left=0.18, right=0.97, top=0.88, bottom=0.16)
-    for extension in ("png", "svg", "pdf"):
-        fig.savefig(output.with_suffix(f".{extension}"), dpi=300, bbox_inches="tight", facecolor="white")
+    fig.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -605,41 +642,50 @@ def run(a1_dir: Path, output_dir: Path) -> dict:
     summary, input_hashes, instances, candidates, conflict_rows = checked_inputs(a1_dir)
     nodes, edges, stats = assemble_statistics(instances, candidates, conflict_rows)
     output_dir.mkdir(parents=True)
-    for contrast in (1, 2, 3):
-        draw_network(nodes, edges, output_dir / f"connected-graph-area-k{contrast}", contrast=contrast)
-    draw_network(nodes, edges, output_dir / "dual-contour-network", contrast=2, dual=True)
-    draw_exact_overlap_network(nodes, edges, output_dir / "connected-graph-exact-overlap")
-    draw_network(nodes, edges, output_dir / "connected-graph-partitions", contrast=2, dual=True, partition_labels=True)
+    counts = [
+        count
+        for row in nodes
+        for count in (row["gold_instance_count"], row["top1_prediction_count"])
+    ]
+    minimum_count, maximum_count = min(counts), max(counts)
+    draw_network(
+        nodes,
+        edges,
+        output_dir / "connected-graph-partitions",
+        dual=True,
+        partition_labels=True,
+    )
 
     write_csv(
         output_dir / "node-statistics.csv",
         [
             {
                 **row,
-                "area_log_k1": AREA_BASE + AREA_COEFFICIENT * math.log1p(row["gold_instance_count"]),
-                "area_log_k2": AREA_BASE + 2 * AREA_COEFFICIENT * math.log1p(row["gold_instance_count"]),
-                "area_log_k3": AREA_BASE + 3 * AREA_COEFFICIENT * math.log1p(row["gold_instance_count"]),
+                "gold_area": node_area(row["gold_instance_count"], minimum_count, maximum_count),
+                "gold_radius": node_radius(row["gold_instance_count"], minimum_count, maximum_count),
+                "top1_area": node_area(row["top1_prediction_count"], minimum_count, maximum_count),
+                "top1_radius": node_radius(row["top1_prediction_count"], minimum_count, maximum_count),
             }
             for row in nodes
         ],
-        ("gramset", "gold_instance_count", "top1_prediction_count", "same_gramset_count", "gold_only_count", "prediction_only_count", "area_log_k1", "area_log_k2", "area_log_k3"),
+        ("gramset", "gold_instance_count", "top1_prediction_count", "same_gramset_count", "gold_only_count", "prediction_only_count", "gold_area", "gold_radius", "top1_area", "top1_radius"),
     )
     write_csv(
         output_dir / "edge-statistics.csv",
         edges,
         ("gold_gramset", "alternative_gramset", "selected_error_count", "opportunity_count", "selected_error_rate", "displayed"),
     )
-    caption = """# Подпись к графу: рабочий вариант
+    caption = f"""# Подпись к графу: connected-graph-partitions
 
-Направленный граф показывает выбранный связный фрагмент ошибок выбора грамсета на dev. Вершина соответствует грамсету; её размер определяется логарифмической функцией числа употреблений с этим текущим gold. Дуга идёт от gold-грамсета к грамсету, выбранному моделью в ошибочном решении; её подпись содержит число таких решений, число употреблений, где эта альтернатива была доступна, и долю. Толщина контура ленты отражает число ошибок.
+Направленные ошибки выбора грамсета на dev. Показан связный подграф из пяти грамсетов и девяти ненулевых направлений, охватывающий {stats['covered_error_count']} из {stats['different_gramset_error_count']} ошибок с несовпадением грамсета ({format_percent(stats['covered_error_rate'])}). Золотой сплошной контур каждого узла обозначает множество употреблений, которым данный грамсет назначен в текущей разметке benchmark; синий пунктирный контур — множество употреблений, которым его назначила модель Top-1. Gold-only показывает число употреблений этого gold-грамсета, отнесённых моделью к другим грамсетам; «Совпало» — число совпадений по грамсету; Top-1-only — число употреблений, ошибочно отнесённых моделью к данному грамсету при другом gold.
 
-Gold означает сохранённую экспертную метку benchmark и не объявляется абсолютной истиной. Рисунок оценивает совпадение грамсетов. Полный кандидат определяется парой `(wordform_id, gramset)`, поэтому совпадение грамсета при другом `wordform_id` не является полным совпадением кандидата. Показан подграф из пяти выбранных грамсетов; он не включает все 347 ошибок с другим грамсетом.
+Размер золотых и синих окружностей рассчитан по одной общей логарифмически преобразованной шкале: максимальная площадь в три раза больше минимальной. Точные количества приведены числами. Взаимное смещение и перекрытие окружностей схематичны и не кодируют величину совпадения. Ленты направлены от gold-грамсета к ошибочно выбранному грамсету Top-1; их ширина отражает число ошибок. Подпись ленты содержит ошибки, число возможностей и долю.
 
-## Текст к варианту «gold и Top-1»
+В метках грамсетов `SG` означает единственное число, `PL` — множественное; `NOM`, `GEN` и `ACC` — соответственно именительный, родительный и аккузативный (винительный) падежи. Используются исходные метки корпусной разметки.
 
-Для каждого грамсета `g` золотой круг представляет множество употреблений `G_g`, которым текущая разметка benchmark назначает этот грамсет; пунктирный круг Top-1 представляет множество `P_g`, которым его назначила модель. Их пересечение — совпадение по грамсету. Это не обязательно совпадение полного кандидата: полный ключ равен `(wordform_id, gramset)`, и другой `wordform_id` остаётся ошибкой полного выбора.
+Совпадение оценивается по грамсету, а не по полному кандидату `(wordform_id, gramset)`: при другом `wordform_id` полный выбор остаётся ошибочным. Числа внутри узлов рассчитаны по всему рассматриваемому dev-benchmark, тогда как ленты показывают только выбранный подграф; поэтому суммы видимых входящих и исходящих ошибок могут не совпадать с Top-1-only и Gold-only.
 
-Gold здесь означает текущую экспертную метку в benchmark, а не утверждение об абсолютной лингвистической истине. Круги изображают множества употреблений, а граф ошибок — выбранные направленные переходы между грамсетами. В схематичном варианте площадь и перекрытие кругов не кодируют числа; в точном варианте площадь каждого круга и его пересечения пропорциональна соответствующему числу уникальных употреблений.
+Gold означает сохранённую экспертную метку benchmark. Возможный пересмотр этой метки фиксируется отдельно и не изменяет исходные результаты анализа.
 """
     (output_dir / "caption-draft.md").write_text(caption, encoding="utf-8")
     output_hashes = {
@@ -648,15 +694,16 @@ Gold здесь означает текущую экспертную метку 
         if path.is_file() and path.name != "summary.json"
     }
     summary_out = {
-        "study": "A2 connected gramset graph and gold-vs-Top-1 visual prototypes",
+        "study": "A2 connected gramset graph partitions",
         "source_a1_dir": str(a1_dir),
         "source_a1_table_sha256": input_hashes,
         "source_prediction_sha256": summary["prediction_source"]["sha256"],
         "source_split": "dev",
-        "node_area_formula": "A = pi * 0.42^2 + k * 0.35 * ln(1 + gold_instance_count), k in {1,2,3}",
+        "node_area_formula": "A = A_min + (3*A_min - A_min) * normalized_log1p(count); shared count range across Gold and Top-1, A_min=pi*0.58^2",
         "edge_visual_encoding": "contour ribbon with white center; outer width is twice the error-count-scaled ribbon width; separate thin outlined arrow head",
         "gold_prediction_sets": "G_g={dev usage: gold gramset g}; P_g={dev usage: frozen top1 gramset g}; overlap counts gramset agreement only",
-        "exact_overlap_network_area_per_instance": 0.0023,
+        "node_area_ratio_max_to_min": MAX_TO_MIN_NODE_AREA,
+        "rendered_formats": ["png"],
         "statistics": stats,
         "nodes": nodes,
         "edges": edges,
