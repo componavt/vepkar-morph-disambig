@@ -19,7 +19,8 @@ from core.data import read_words  # noqa: E402
 
 A1_DIR = ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v5"
 DATA_DIR = ROOT / "data/dictorpus-data"
-DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-context-cards-b1-v6"
+DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-context-cards-b1-v7"
+QUESTIONNAIRE_VERSION = "B1-v7"
 LANGUAGES = ("vep", "krl", "olo", "lud")
 PILOT_LANGUAGES = ("vep", "krl", "olo")
 FAMILIES = {
@@ -520,6 +521,7 @@ def repeated_context_levels(level_spans: dict[str, tuple[int, int]]) -> dict[str
         result[level] = {
             "repeat_of_level": repeat_of or "",
             "requires_new_answer": int(repeat_of is None),
+            "response_origin": "new_response" if repeat_of is None else "repeated_context",
         }
         if repeat_of is None:
             first_level_by_span[span] = level
@@ -659,7 +661,12 @@ def write_markdown(
     neutral_by_level = {
         (language, level): [
             f"# Контекстный опросник B1 — `{language}`, {level}", "",
-            "Пожалуйста, заполните этот этап и сохраните ответы до получения следующего файла. Не ищите исходный текст во внешних источниках.",
+            f"Эксперт: ______  ·  Версия: `{QUESTIONNAIRE_VERSION}`  ·  Этап: `{level}`  ·  Дата заполнения: ______", "",
+            (
+                "Это заключительный этап. Пожалуйста, заполните его и верните файл с ответами."
+                if level == "FULL"
+                else "Заполните этот этап в своём экземпляре и сохраните ответы без изменений до следующего этапа. Не ищите исходный текст во внешних источниках."
+            ),
             "Для каждой карточки укажите один или несколько допустимых разборов либо один специальный статус. Комментарий необязателен.", "",
         ]
         for language in PILOT_LANGUAGES
@@ -721,6 +728,7 @@ def write_markdown(
                 "- [ ] Проблема текста или данных",
                 "",
                 "Коды выбранных вариантов (A; B; ...; только если выбран первый статус): ______",
+                "Более широкий контекст был показан до этого этапа? [ ] нет  [ ] да; если да, какой уровень: ______",
                 "Комментарий (необязательно): ______", "", "---", "",
             ])
     (output_dir / "internal-cards.md").write_text("\n".join(internal) + "\n", encoding="utf-8")
@@ -800,12 +808,15 @@ def run(a1_dir: Path, data_dir: Path, output_dir: Path, questionnaire_root: Path
     write_csv(
         output_dir / "context-views-internal.csv",
         context_rows,
-        ("card_id", "target_id", "language", "text_id", "sentence_id", "level", "span_start", "span_end", "repeat_of_level", "requires_new_answer", "token_count", "same_as_full_sentence", "context_text"),
+        ("card_id", "target_id", "language", "text_id", "sentence_id", "level", "span_start", "span_end", "repeat_of_level", "requires_new_answer", "response_origin", "token_count", "same_as_full_sentence", "context_text"),
     )
     write_markdown(output_dir, cards, target_rows, context_rows, questionnaire_root)
 
     errors_by_family = Counter()
     opportunities_by_family = Counter()
+    primary_target_ids = {
+        target["target_id"] for target in target_rows if target["is_primary_target"]
+    }
     for row in registry:
         key = (row["language"], row["family"])
         opportunities_by_family[key] += 1
@@ -817,7 +828,8 @@ def run(a1_dir: Path, data_dir: Path, output_dir: Path, questionnaire_root: Path
         "source_word_tables_sha256": word_hashes,
         "source_prediction_sha256": summary["prediction_source"]["sha256"],
         "source_split": "dev",
-        "context_definition": "K0 target only; K1/K2/K3 token windows by word_id and word_number; FULL all word-table tokens in the sentence",
+        "questionnaire_version": QUESTIONNAIRE_VERSION,
+        "context_definition": "K0 target wordform plus the fixed list of available candidate gramsets; K1/K2/K3 token windows by word_id and word_number plus the same candidate list; FULL all word-table tokens in the sentence plus the same candidate list",
         "context_token_source": "full sequence of exported words_<language>.csv.zst `word` values sorted by word_number; not a recovered original sentence string; punctuation/capitalization are not restored",
         "selection_unit": "one primary target per sentence for staged context judgments; additional targets remain internal",
         "selection_is_purposive": True,
@@ -836,11 +848,18 @@ def run(a1_dir: Path, data_dir: Path, output_dir: Path, questionnaire_root: Path
         "primary_target_count": sum(row["is_primary_target"] for row in target_rows),
         "additional_internal_target_count": sum(not row["is_primary_target"] for row in target_rows),
         "context_view_count": len(context_rows),
+        "repeated_context_view_count": sum(not row["requires_new_answer"] for row in context_rows),
+        "primary_target_repeated_context_count": sum(
+            row["target_id"] in primary_target_ids and not row["requires_new_answer"]
+            for row in context_rows
+        ),
+        "new_response_request_count": sum(
+            row["target_id"] in primary_target_ids and row["requires_new_answer"]
+            for row in context_rows
+        ),
+        "response_request_scope": "primary targets only; additional targets remain internal",
         "unique_primary_context_response_count": sum(
-            row["target_id"] in {
-                target["target_id"] for target in target_rows if target["is_primary_target"]
-            }
-            and row["requires_new_answer"]
+            row["target_id"] in primary_target_ids and row["requires_new_answer"]
             for row in context_rows
         ),
         "context_levels": list(CONTEXT_LEVELS),

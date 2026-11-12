@@ -21,8 +21,10 @@ def test_repeated_context_spans_do_not_require_duplicate_answers():
         {"K0": (3, 3), "K1": (2, 4), "K2": (1, 5), "K3": (0, 6), "FULL": (0, 6)}
     )
     assert result["K0"]["requires_new_answer"] == 1
+    assert result["K0"]["response_origin"] == "new_response"
     assert result["FULL"]["repeat_of_level"] == "K3"
     assert result["FULL"]["requires_new_answer"] == 0
+    assert result["FULL"]["response_origin"] == "repeated_context"
 
 
 def test_response_schema_allows_multiple_analyses_and_special_statuses():
