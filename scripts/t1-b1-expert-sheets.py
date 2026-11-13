@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Render the frozen B1-v7 context cards as one .xlsx workbook per stage.
+"""Render frozen B1 context cards as one .xlsx workbook per stage.
 
 The workbooks are meant to be uploaded to Google Drive and opened as Google
 Sheets by the project lead; the script never talks to any online service.
 
-Content is taken unchanged from the B1-v7 internal tables (targets, option
+Content is taken unchanged from the B1 internal selection tables (targets, option
 codes, context spans). Only the presentation differs from the Markdown mock-ups:
   * the context is shown in the original corpus spelling (case, punctuation,
     apostrophes) taken from ``sentence_xml`` instead of normalized tokens;
@@ -28,14 +28,20 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.cell.rich_text import CellRichText, TextBlock
 from openpyxl.cell.text import InlineFont
+from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data/dictorpus-data"
-B1_DIR = ROOT / "work/experiments/v2026.11/t1-context-cards-b1-v7"
-DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-b1-sheets-v1"
-QUESTIONNAIRE_VERSION = "B1-v7"
+DEFAULT_B1_DIR = ROOT / "work/experiments/v2026.11/t1-context-cards-b1-v8"
+DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-b1-sheets-v2"
+DEFAULT_VERSION = "B1-v8"
+LISTS_SHEET = "Списки"
+# Per-option answer; row-level statuses are derived in analysis, not asked:
+#   any "да" -> analyses_selected; any "не ясно" -> insufficient context for that option;
+#   all "нет" -> none_applicable; data problems go to the comment.
+OPTION_ANSWERS = ("да", "нет", "не ясно")
 LEVELS = ("K0", "K1", "K2", "K3", "FULL")
 LEVEL_TITLES = {
     "K0": "K0 — только словоформа",
@@ -49,15 +55,13 @@ GRAMSET_ORDER = (
     "reflexive", "infinitive", "mood", "tense", "person",
     "case", "number", "negation", "voice", "participle",
 )
-STATUS_LABELS = (
-    "Выбраны допустимые разборы",
-    "Недостаточно контекста",
-    "Ни один вариант не подходит",
-    "Проблема текста или данных",
-)
-SEEN_EARLY_LABELS = ("нет", "да: K1", "да: K2", "да: K3", "да: полное предложение")
-MAX_OPTIONS = 4
-OPTION_CODES = "ABCD"
+# Maria annotated most Veps texts herself, so the realistic "earlier context" is recognition.
+RECOGNIZED_LABELS = ("нет", "да")
+OPTION_CODES = "ABCDEFGH"
+# Muted fills: answer colours (conditional formatting) and the "nothing to do" row tint.
+ANSWER_FILLS = {"да": "D9EAD3", "нет": "F4CCCC", "не ясно": "FFF2CC"}
+UNUSED_FILL = "E7E6E6"
+REPEATED_FILL = "EEF3F8"
 
 
 def read_csv(path: Path) -> list[dict[str, str]]:
@@ -132,14 +136,38 @@ def rich(pieces: list[tuple[str, bool]]) -> CellRichText:
     return CellRichText(*[TextBlock(bold, text) if flag else text for text, flag in pieces])
 
 
-def build_language(language: str, output: Path, labels: dict[str, str]) -> list[dict[str, str]]:
+def list_range(column: str, values) -> str:
+    """Absolute reference to a value list on the lists sheet (rows 2..n+1)."""
+    return f"'{LISTS_SHEET}'!${column}$2:${column}${len(values) + 1}"
+
+
+def write_lists(wb) -> None:
+    """Hidden sheet holding dropdown values; validations refer to its ranges."""
+    sheet = wb.create_sheet(LISTS_SHEET)
+    for column, (title, values) in enumerate(
+        (("Допустим?", OPTION_ANSWERS), ("Узнаёте?", RECOGNIZED_LABELS)), start=1
+    ):
+        sheet.cell(1, column, title)
+        for row, value in enumerate(values, start=2):
+            sheet.cell(row, column, value)
+    sheet.sheet_state = "hidden"
+
+
+def recognition_question(level: str) -> str:
+    """At FULL the whole sentence is visible, so only the wider text can be recognized."""
+    if level == "FULL":
+        return "Узнаёте текст, из которого взято это предложение?"
+    return "Узнаёте это предложение или текст?"
+
+
+def build_language(language: str, output: Path, labels: dict[str, str], b1_dir: Path, version: str, levels=LEVELS) -> list[dict[str, str]]:
     targets = [
-        row for row in read_csv(B1_DIR / "selected-targets-internal.csv")
+        row for row in read_csv(b1_dir / "selected-targets-internal.csv")
         if row["language"] == language and row["is_primary_target"] == "1"
     ]
     views = {
         (row["target_id"], row["level"]): row
-        for row in read_csv(B1_DIR / "context-views-internal.csv")
+        for row in read_csv(b1_dir / "context-views-internal.csv")
         if row["language"] == language
     }
     sentence_ids = {row["sentence_id"] for row in targets}
@@ -148,30 +176,38 @@ def build_language(language: str, output: Path, labels: dict[str, str]) -> list[
         for row in read_zst_csv(DATA_DIR / f"corpus/sentences_{language}.csv.zst")
         if row["sentence_id"] in sentence_ids
     }
+    max_options = max(len(t["neutral_option_map_internal"].split(";")) for t in targets)
     manifest = []
-    for level in LEVELS:
+    for level in levels:
+        path = output / f"{version}-{language}-{level}.xlsx"
+        if path.exists():
+            sys.exit(f"Refusing to overwrite an existing (possibly issued) workbook: {path}")
         wb = Workbook()
         intro = wb.active
         intro.title = "Инструкция"
-        write_instructions(intro, language, level)
+        write_instructions(intro, language, level, version)
         sheet = wb.create_sheet("Карточки")
         header = ["№", "Карточка", "Словоформа", "Контекст"]
-        for code in OPTION_CODES[:MAX_OPTIONS]:
+        for code in OPTION_CODES[:max_options]:
             header += [f"Вариант {code}", f"{code} допустим?"]
-        header += ["Статус ответа", "Видели более широкий контекст раньше?", "Комментарий (необязательно)"]
+        header += [recognition_question(level), "Комментарий (необязательно)"]
         sheet.append(header)
         for cell in sheet[1]:
             cell.font = Font(bold=True)
             cell.alignment = Alignment(wrap_text=True, vertical="top")
         sheet.freeze_panes = "E2"
 
-        yes = DataValidation(type="list", formula1='"да"', allow_blank=True)
-        status = DataValidation(type="list", formula1='"' + ",".join(STATUS_LABELS) + '"', allow_blank=True)
-        seen = DataValidation(type="list", formula1='"' + ",".join(SEEN_EARLY_LABELS) + '"', allow_blank=True)
-        for validation in (yes, status, seen):
+        write_lists(wb)
+        yes = DataValidation(type="list", formula1=list_range("A", OPTION_ANSWERS), allow_blank=True)
+        seen = DataValidation(type="list", formula1=list_range("B", RECOGNIZED_LABELS), allow_blank=True)
+        for validation in (yes, seen):
+            validation.showErrorMessage = True
+            validation.error = "Выберите значение из списка"
+        for validation in (yes, seen):
             sheet.add_data_validation(validation)
 
-        grey = PatternFill("solid", fgColor="E7E6E6")
+        grey = PatternFill("solid", fgColor=UNUSED_FILL)
+        calm = PatternFill("solid", fgColor=REPEATED_FILL)
         for number, target in enumerate(targets, start=1):
             view = views[(target["target_id"], level)]
             words, gaps = sentence_tokens(sentences[target["sentence_id"]])
@@ -191,7 +227,7 @@ def build_language(language: str, output: Path, labels: dict[str, str]) -> list[
             else:
                 pieces = render_context(words, gaps, int(view["span_start"]), int(view["span_end"]), index, level)
                 sheet.cell(row_index, 4).value = rich(pieces)
-            for slot in range(MAX_OPTIONS):
+            for slot in range(max_options):
                 label_cell = sheet.cell(row_index, 5 + 2 * slot)
                 answer_cell = sheet.cell(row_index, 6 + 2 * slot)
                 if slot < len(options):
@@ -206,27 +242,48 @@ def build_language(language: str, output: Path, labels: dict[str, str]) -> list[
                 else:
                     label_cell.fill = grey
                     answer_cell.fill = grey
-            last = 5 + 2 * MAX_OPTIONS
+            last = 5 + 2 * max_options
             if repeated:
-                for column in range(5, last + 3):
-                    sheet.cell(row_index, column).fill = grey
+                # Whole row in a calm tint: the expert can skip it.
+                for column in range(1, last + 2):
+                    sheet.cell(row_index, column).fill = calm
             else:
-                status.add(sheet.cell(row_index, last))
-                seen.add(sheet.cell(row_index, last + 1))
-            for column in range(1, last + 3):
+                seen.add(sheet.cell(row_index, last))
+            for column in range(1, last + 2):
                 sheet.cell(row_index, column).alignment = Alignment(wrap_text=True, vertical="top")
-        widths = [5, 17, 14, 60] + [26, 10] * MAX_OPTIONS + [26, 22, 40]
-        for column, width in enumerate(widths, start=1):
-            sheet.column_dimensions[sheet.cell(1, column).column_letter].width = width
-        path = output / f"{QUESTIONNAIRE_VERSION}-{language}-{level}.xlsx"
+        # Answer colours via conditional formatting (kept by Excel and Google Sheets import).
+        answer_range = " ".join(
+            f"{sheet.cell(2, 6 + 2 * slot).column_letter}2:{sheet.cell(2, 6 + 2 * slot).column_letter}{len(targets) + 1}"
+            for slot in range(max_options)
+        )
+        for value, colour in ANSWER_FILLS.items():
+            sheet.conditional_formatting.add(
+                answer_range,
+                CellIsRule(operator="equal", formula=[f'"{value}"'], fill=PatternFill("solid", fgColor=colour, bgColor=colour)),
+            )
+        # Column widths from content (characters), within sensible bounds.
+        for column in range(1, last + 2):
+            letter = sheet.cell(1, column).column_letter
+            longest = max(
+                len(str(sheet.cell(row, column).value or "")) for row in range(2, len(targets) + 2)
+            )
+            header_words = max(len(w) for w in str(sheet.cell(1, column).value).split())
+            if column == last + 1:  # comment: room to write
+                width = 40
+            elif column == 4 and level != "K0":  # context sentence
+                width = min(80, max(30, longest + 2))
+            else:
+                width = max(header_words + 2, min(45, longest + 2))
+            sheet.column_dimensions[letter].width = width
+        path = output / f"{version}-{language}-{level}.xlsx"
         wb.save(path)
         print(f"wrote {path.relative_to(ROOT)}")
     return manifest
 
 
-def write_instructions(sheet, language: str, level: str) -> None:
+def write_instructions(sheet, language: str, level: str, version: str) -> None:
     lines = [
-        (f"Контекстный опросник {QUESTIONNAIRE_VERSION} · язык: {language} · этап {LEVEL_TITLES[level]}", True),
+        (f"Контекстный опросник {version} · язык: {language} · этап {LEVEL_TITLES[level]}", True),
         ("", False),
         ("Эксперт:", True),
         ("Начало работы над этапом (дата и время):", True),
@@ -235,18 +292,18 @@ def write_instructions(sheet, language: str, level: str) -> None:
         ("Что нужно сделать", True),
         ("В листе «Карточки» каждая строка — одна словоформа из текстов ВепКар и предложенные для неё грамматические разборы.", False),
         ("Рассмотрите словоформу в показанном контексте (выделена и заключена в квадратные скобки).", False),
-        ("Отметьте «да» в столбце рядом с каждым разбором, который вы считаете допустимым. Можно отметить несколько.", False),
-        ("В столбце «Статус ответа» выберите ровно один статус:", False),
-        ("  • «Выбраны допустимые разборы» — если отмечен хотя бы один разбор;", False),
-        ("  • «Недостаточно контекста» — по показанному фрагменту нельзя решить, какие разборы допустимы;", False),
-        ("  • «Ни один вариант не подходит» — в списке нет подходящего разбора;", False),
-        ("  • «Проблема текста или данных» — ошибка в словоформе, контексте или карточке (поясните в комментарии).", False),
-        ("Комментарий необязателен.", False),
+        ("Для каждого разбора выберите в соседнем столбце одно значение:", False),
+        ("  • «да» — разбор допустим в показанном контексте (допустимыми можно считать несколько разборов);", False),
+        ("  • «нет» — разбор недопустим;", False),
+        ("  • «не ясно» — по показанному фрагменту нельзя решить, допустим ли этот разбор.", False),
+        ("Если ни один разбор не подходит, отметьте все «нет» и, по желанию, напишите в комментарии, какой разбор нужен.", False),
+        ("Если вы заметили ошибку в словоформе, тексте или карточке, опишите её в комментарии.", False),
+        ("Комментарий необязателен. Пустые ячейки не считаются ответом «нет».", False),
         ("", False),
         ("Порядок работы", True),
         ("Материал выдаётся по этапам: сначала только словоформа, затем всё более широкий контекст, в конце — полное предложение.", False),
         ("Заполняйте только текущий этап. После сдачи этапа ответы не меняются: если мнение изменилось, укажите это на следующем этапе.", False),
-        ("Если вы уже видели более широкий контекст (например, узнали текст), отметьте это в столбце «Видели более широкий контекст раньше?».", False),
+        (("Если вы узнаёте текст, из которого взято предложение (например, размечали его раньше), отметьте «да» в столбце «" + recognition_question(level) + "». Это не ошибка — нам важно это знать.") if level == "FULL" else ("Если вы узнаёте предложение или текст (например, размечали его раньше), отметьте «да» в столбце «" + recognition_question(level) + "». Это не ошибка — нам важно это знать."), False),
         ("Серые строки повторяют уже показанный контекст — отвечать на них не нужно.", False),
         ("Не ищите исходное предложение во внешних источниках во время заполнения.", False),
         ("Не нужно угадывать ответ программы или прежнюю разметку корпуса — нас интересует ваше суждение.", False),
@@ -265,18 +322,24 @@ def write_instructions(sheet, language: str, level: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--language", default="vep", choices=("vep", "krl", "olo"))
+    parser.add_argument("--b1-dir", type=Path, default=DEFAULT_B1_DIR, help="selection directory (contains <language>/)")
+    parser.add_argument("--version", default=DEFAULT_VERSION)
+    parser.add_argument("--levels", nargs="+", default=list(LEVELS), choices=LEVELS,
+                        help="stages to (re)build; existing workbooks are never overwritten")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
     output = args.output / args.language
-    if output.exists() and any(output.iterdir()):
-        sys.exit(f"Output directory is not empty, refusing to overwrite: {output}")
     output.mkdir(parents=True, exist_ok=True)
-    manifest = build_language(args.language, output, gramset_labels())
-    with (output / "option-labels-internal.csv").open("w", encoding="utf-8", newline="") as handle:
+    b1_dir = args.b1_dir / args.language if (args.b1_dir / args.language).is_dir() else args.b1_dir
+    manifest = build_language(args.language, output, gramset_labels(), b1_dir, args.version, tuple(args.levels))
+    manifest_path = output / ("option-labels-internal.csv" if len(args.levels) == len(LEVELS) else f"option-labels-internal-{'-'.join(args.levels)}.csv")
+    if manifest_path.exists():
+        sys.exit(f"Refusing to overwrite {manifest_path}")
+    with manifest_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(manifest[0]))
         writer.writeheader()
         writer.writerows(manifest)
-    print(f"wrote {(output / 'option-labels-internal.csv').relative_to(ROOT)}")
+    print(f"wrote {manifest_path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
