@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import t1x_lib as L  # noqa: E402
 
-OUT = L.ROOT / "work/experiments/v2026.11/s3-cue-lexicon-v1/vep"
+OUT = L.EXP / "s3-cue-lexicon-v1/vep"
 WINDOW = 3
 # (class, lemma, Russian gloss, lemma_ids in lemmas_vep) -- Kosheleva 2023, I infinitive
 CUES = [
@@ -61,7 +61,7 @@ def cue_hits(corpus, lang, sentence_id, pos):
 
 
 def main():
-    corpus = pickle.load(open(L.ROOT / "work/experiments/v2026.11/t1x-v1/corpus.pkl", "rb"))
+    corpus = pickle.load(open(L.EXP / "t1x-v1/corpus.pkl", "rb"))
     OUT.mkdir(parents=True, exist_ok=True)
     with (OUT / "cue_lexicon_vep.csv").open("w", encoding="utf-8", newline="") as h:
         w = csv.writer(h)

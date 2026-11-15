@@ -23,6 +23,8 @@ from core.splits import (
     SplitError,
     TextWeight,
     assign_texts,
+    inherit_assignments,
+    read_split_csv,
     build_split_rows,
     compute_text_weights,
     split_csv_bytes,
@@ -55,12 +57,20 @@ def _run_make_splits(args: argparse.Namespace) -> int:
             all_instances.extend(result.instances)
             print(f"  {lang}  OK", file=sys.stderr, flush=True)
         weights = compute_text_weights(all_instances)
+        previous = (
+            read_split_csv(args.inherit_from)
+            if getattr(args, "inherit_from", None) is not None
+            else None
+        )
         assignments: dict[str, dict[str, tuple[TextWeight, ...]]] = {}
         for lang in SUPPORTED_LANGUAGES:
             lang_weights = tuple(
                 weight for weight in weights if weight.language == lang
             )
-            assignments[lang] = assign_texts(lang_weights)
+            if previous is None:
+                assignments[lang] = assign_texts(lang_weights)
+            else:
+                assignments[lang] = inherit_assignments(lang_weights, previous)
         validate_split_assignments(assignments, weights)
         rows = build_split_rows(assignments)
         content = split_csv_bytes(rows)

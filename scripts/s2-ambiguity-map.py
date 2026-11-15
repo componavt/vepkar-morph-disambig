@@ -3,7 +3,7 @@
 
 Population: tokens with >= 2 distinct (wordform_id, gramset) candidates and no
 empty gramset, in all texts except the test split. Types come from S1 pair types.
-Outputs (work/experiments/v2026.11/s2-ambiguity-map-v1/<lang>/):
+Outputs (work/experiments/<tag>/s2-ambiguity-map-v1/<lang>/):
   map.json                  population, Q1-Q4 summaries
   type_by_dialect.csv       tokens per (senior type, dialect), all vs annotated
   ambiguity_classes.csv     the 30 most frequent candidate gramset sets
@@ -22,7 +22,11 @@ from itertools import combinations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+from core.instances import determine_data_tag  # noqa: E402
+
 DATA = ROOT / "data/dictorpus-data"
+TAG = determine_data_tag(DATA)
 
 
 def zst_rows(path):
@@ -34,11 +38,11 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--language", default="vep")
     lang = p.parse_args().language
-    out = ROOT / f"work/experiments/v2026.11/s2-ambiguity-map-v1/{lang}"
+    out = ROOT / f"work/experiments/{TAG}/s2-ambiguity-map-v1/{lang}"
     out.mkdir(parents=True, exist_ok=True)
-    with (ROOT / f"work/experiments/v2026.11/s1-pair-types-v1/{lang}/pair_types_auto.csv").open(encoding="utf-8") as h:
+    with (ROOT / f"work/experiments/{TAG}/s1-pair-types-v1/{lang}/pair_types_auto.csv").open(encoding="utf-8") as h:
         ptype = {frozenset((r["gramset_a"], r["gramset_b"])): r["type_proposed"] for r in csv.DictReader(h)}
-    with (ROOT / "data/derived/splits_v2026.11.csv").open(encoding="utf-8") as h:
+    with (ROOT / f"data/derived/splits_{TAG}.csv").open(encoding="utf-8") as h:
         test = {r["text_id"] for r in csv.DictReader(h) if r["language"] == lang and r["split"] == "test"}
     texts = {r["text_id"]: r for r in zst_rows(DATA / f"corpus/texts_{lang}.csv.zst")}
     sent_text = {r["sentence_id"]: r["text_id"] for r in zst_rows(DATA / f"corpus/sentences_{lang}.csv.zst")}

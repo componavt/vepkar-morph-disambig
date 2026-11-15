@@ -29,9 +29,13 @@ from itertools import combinations
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+from core.instances import determine_data_tag  # noqa: E402
+
 DATA_DIR = ROOT / "data/dictorpus-data"
-SPLIT_FILE = ROOT / "data/derived/splits_v2026.11.csv"
-DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/s1-pair-types-v1"
+TAG = determine_data_tag(DATA_DIR)
+SPLIT_FILE = ROOT / f"data/derived/splits_{TAG}.csv"
+DEFAULT_OUTPUT = ROOT / f"work/experiments/{TAG}/s1-pair-types-v1"
 EMPTY_GRAMSET_IDS = {"0", "7"}
 MIN_DIALECT_LEMMAS = 30  # dialect lexicon rates are reported only above this support
 SAME_LEMMA_LOW = 0.2     # token share below which a pair is treated as cross-lemma

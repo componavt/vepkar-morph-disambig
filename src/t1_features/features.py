@@ -151,13 +151,22 @@ def _build_features(
     word: str,
     left_word: str,
     right_word: str,
-    left_context: tuple[str | None, ...],
-    right_context: tuple[str | None, ...],
+    left_context: tuple[str | None, ...] | None = None,
+    right_context: tuple[str | None, ...] | None = None,
     include_left_context: bool = True,
     include_right_context: bool = True,
     suffix_max_length: int = 4,
     affix_values: tuple[str, ...] | None = None,
 ) -> dict[str, float]:
+    """Build one candidate's sparse features.
+
+    Omitted context windows default to the immediate neighbours only, which
+    reproduces the original window of one word on each side.
+    """
+    if left_context is None:
+        left_context = (left_word,)
+    if right_context is None:
+        right_context = (right_word,)
     if type(suffix_max_length) is not int or suffix_max_length < 0:
         raise FeatureConstructionError(
             "suffix_max_length must be a nonnegative integer, "

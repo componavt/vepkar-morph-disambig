@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import html
+import os
 import io
 import math
 import re
@@ -37,9 +38,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from benchmark_context import load_benchmark_context  # noqa: E402
+from core.instances import determine_data_tag  # noqa: E402
 
 DATA_DIR = ROOT / "data/dictorpus-data"
-TAG = "v2026.11"
+# The data tag follows the checkout in data/dictorpus-data; outputs of every
+# experiment go to work/experiments/<TAG>/.  VEPKAR_DATA_TAG may assert it.
+TAG = determine_data_tag(DATA_DIR)
+if os.environ.get("VEPKAR_DATA_TAG", TAG) != TAG:
+    raise SystemExit(f"data checkout is {TAG}, VEPKAR_DATA_TAG={os.environ['VEPKAR_DATA_TAG']}")
+EXP = ROOT / "work/experiments" / TAG
 LANGS = ("krl", "lud", "olo", "vep")
 EMPTY_GRAMSET_IDS = {"0", "7"}
 SUFFIX_K = 5
@@ -149,7 +156,7 @@ def load_corpus(log=print) -> Corpus:
                 by_lemma_string[(lemma, wf)] += 1
         for (lg, wf, gid), lemmas in lem.items():
             corpus.cell_multiplicity[(lang, str(wf), gid)] = max(by_lemma_string[(l, wf)] for l in lemmas)
-        pair_file = ROOT / f"work/experiments/v2026.11/s1-pair-types-v1/{lang}/pair_types_auto.csv"
+        pair_file = EXP / f"s1-pair-types-v1/{lang}/pair_types_auto.csv"
         with pair_file.open(encoding="utf-8") as handle:
             corpus.obligatory_pairs[lang] = {
                 frozenset((r["gramset_a"], r["gramset_b"])) for r in csv.DictReader(handle) if r["type_proposed"] == "1"}
@@ -568,7 +575,7 @@ _CUE_LEMMA = None
 def cue_classes(corpus, item, window=3):
     global _CUE_LEMMA
     if _CUE_LEMMA is None:
-        path = ROOT / "work/experiments/v2026.11/s3-cue-lexicon-v1/vep/cue_lexicon_vep.csv"
+        path = EXP / "s3-cue-lexicon-v1/vep/cue_lexicon_vep.csv"
         _CUE_LEMMA = {}
         with path.open(encoding="utf-8") as h:
             for r in csv.DictReader(h):

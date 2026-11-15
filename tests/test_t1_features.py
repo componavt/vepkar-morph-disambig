@@ -14,10 +14,24 @@ from t1_features.features import (  # noqa: E402
     ContextWord,
     FeatureConstructionError,
     _build_features,
-    _resolve_context,
+    _resolve_context as _resolve_context_windows,
     build_candidate_examples,
 )
 from core.instances import Candidate, Instance  # noqa: E402
+
+
+def _resolve_context(instances, context_words):
+    """Window-1 view of ``_resolve_context``: ``{key: (left, right)}``.
+
+    The resolver returns per-side windows; with the default window of one
+    word each window holds exactly the immediate neighbour.
+    """
+    resolved = _resolve_context_windows(instances, context_words)
+    pairs = {}
+    for key, (left, right) in resolved.items():
+        assert len(left) == len(right) == 1
+        pairs[key] = (left[0], right[0])
+    return pairs
 
 
 class TestTypes:
@@ -1204,3 +1218,50 @@ class TestBuildCandidateExamples:
             build_candidate_examples([instance], words, mode="train")
         message = str(exc.value)
         assert "missing" in message.lower()
+
+
+class TestResolveContextWindows:
+    def test_window_two_marks_boundary_then_missing(self):
+        instances = [make_instance("krl", 2, 50, 2, "B")]
+        words = [
+            make_word("krl", 50, 1, 1, "A"),
+            make_word("krl", 50, 2, 2, "B"),
+            make_word("krl", 50, 3, 3, "C"),
+            make_word("krl", 50, 4, 4, "D"),
+        ]
+        assert _resolve_context_windows(instances, words, context_window=3) == {
+            ("krl", 2): (("A", "<BOS>", None), ("C", "D", "<EOS>")),
+        }
+
+    def test_default_window_is_one_word(self):
+        instances = [make_instance("krl", 2, 50, 2, "B")]
+        words = [
+            make_word("krl", 50, 1, 1, "A"),
+            make_word("krl", 50, 2, 2, "B"),
+        ]
+        assert _resolve_context_windows(instances, words) == {
+            ("krl", 2): (("A",), ("<EOS>",)),
+        }
+
+
+class TestBuildFeaturesContextWindow:
+    def test_omitted_windows_equal_explicit_immediate_neighbours(self):
+        common = dict(language="krl", gramset="SG+GEN", word="in", left_word="a", right_word="b")
+        assert _build_features(**common) == _build_features(
+            **common, left_context=("a",), right_context=("b",)
+        )
+
+    def test_offset_features_for_wider_window(self):
+        features = _build_features(
+            language="krl", gramset="SG+GEN", word="in", left_word="a", right_word="b",
+            left_context=("a", "<BOS>"), right_context=("b", None),
+        )
+        assert '["left_gramset_offset","SG+GEN","2","<BOS>"]' in features
+        assert not any(k.startswith('["right_gramset_offset"') for k in features)
+
+    def test_mismatched_immediate_neighbour_rejected(self):
+        with pytest.raises(FeatureConstructionError):
+            _build_features(
+                language="krl", gramset="SG+GEN", word="in", left_word="a", right_word="b",
+                left_context=("x",), right_context=("b",),
+            )

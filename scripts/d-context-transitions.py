@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import t1x_lib as L  # noqa: E402
 
-BASE = L.ROOT / "work/experiments/v2026.11"
+BASE = L.EXP
 WINDOWS = [
     ("none", BASE / "context-ablation-k5-v1/runs/no_context/c-7/dev.csv"),
     ("±1", BASE / "context-ablation-k5-v1/runs/both/c-7/dev.csv"),

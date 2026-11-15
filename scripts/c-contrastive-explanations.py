@@ -21,7 +21,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import t1x_lib as L  # noqa: E402
 
-BASE = L.ROOT / "work/experiments/v2026.11"
+BASE = L.EXP
+# B1-v8 expert cards are frozen on v2026.11; their word_ids are unchanged in later releases.
+B1_TARGETS = L.ROOT / "work/experiments/v2026.11/t1-context-cards-b1-v8/vep/selected-targets-internal.csv"
 
 
 def main():
@@ -35,7 +37,7 @@ def main():
     w, vocab = saved["model"].w, saved["vocab"]
     cfg = L.FeatureConfig(**saved["config"])
     by_word = {it.word_id: it for it in corpus.dev}
-    with (BASE / "t1-context-cards-b1-v8/vep/selected-targets-internal.csv").open(encoding="utf-8") as h:
+    with B1_TARGETS.open(encoding="utf-8") as h:
         targets = list(csv.DictReader(h))
     lines = [f"# C — контрастные вклады признаков ({args.run}), карточки B1-v8 (vep)", "",
              "Для каждой цели: решение модели и признаки, сильнее всего сдвинувшие его от gold "

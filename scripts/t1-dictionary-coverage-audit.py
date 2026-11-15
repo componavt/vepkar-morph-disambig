@@ -460,24 +460,32 @@ def run_audit(data_dir: Path, split_file: Path, output_dir: Path) -> None:
     print(f"\nWrote audit outputs to {output_dir}")
 
 
+def _current_tag() -> str:
+    """Tag of the default data checkout; names the default output directory."""
+    from core.instances import determine_data_tag
+
+    return determine_data_tag(ROOT / "data" / "dictorpus-data")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--data-dir", type=Path, default=ROOT / "data" / "dictorpus-data"
     )
     parser.add_argument(
-        "--split-file", type=Path, default=ROOT / "data" / "derived" / "splits_v2026.11.csv"
+        "--split-file", type=Path, default=None
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=ROOT
-        / "work"
-        / "experiments"
-        / "v2026.11"
-        / "dictionary-coverage-audit-v1",
+        default=None,
     )
     args = parser.parse_args()
+    tag = _current_tag()
+    if args.split_file is None:
+        args.split_file = ROOT / "data" / "derived" / f"splits_{tag}.csv"
+    if args.output_dir is None:
+        args.output_dir = ROOT / "work" / "experiments" / tag / "dictionary-coverage-audit-v1"
     run_audit(args.data_dir, args.split_file, args.output_dir)
 
 

@@ -13,9 +13,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import t1x_lib as L  # noqa: E402
 
-RUNS = L.ROOT / "work/experiments/v2026.11/t1x-v1/runs"
-OUT = L.ROOT / "work/experiments/v2026.11/t1x-v1/analysis"
-A1 = L.ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v5/instances.csv"
+RUNS = L.EXP / "t1x-v1/runs"
+OUT = L.EXP / "t1x-v1/analysis"
+A1 = L.EXP / "t1-dev-error-analysis-a1-v5/instances.csv"
 
 MAIN = [
     ("поточечно, база (T1.1, C=7)", "point-base__C7"),
@@ -48,7 +48,7 @@ def load(name):
 def pair_types():
     types = {}
     for lang in L.LANGS:
-        path = L.ROOT / f"work/experiments/v2026.11/s1-pair-types-v1/{lang}/pair_types_auto.csv"
+        path = L.EXP / f"s1-pair-types-v1/{lang}/pair_types_auto.csv"
         with path.open(encoding="utf-8") as h:
             for r in csv.DictReader(h):
                 types[(lang, frozenset((r["gramset_a"], r["gramset_b"])))] = r["type_proposed"]

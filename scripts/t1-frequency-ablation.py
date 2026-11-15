@@ -401,8 +401,6 @@ def run_experiment(args: argparse.Namespace) -> dict:
     if args.output_dir.exists() or args.output_dir.is_symlink():
         raise T1FrequencyAblationError(f"output already exists: {args.output_dir}")
     data_dir, tag = _preflight_benchmark(args.data_dir)
-    if tag != "v2026.11":
-        raise T1FrequencyAblationError(f"expected data v2026.11, found {tag!r}")
     split_path = args.split_file or ROOT / "data" / "derived" / f"splits_{tag}.csv"
     split_path = split_path.expanduser().resolve()
     reference_dir = args.reference_dir.expanduser().resolve()
@@ -414,7 +412,7 @@ def run_experiment(args: argparse.Namespace) -> dict:
     )
     train_instances = train_inputs.instances
     dev_instances = dev_inputs.instances
-    if len(train_instances) != 20845 or len(dev_instances) != 2613:
+    if tag == "v2026.11" and (len(train_instances) != 20845 or len(dev_instances) != 2613):
         raise T1FrequencyAblationError(
             "unexpected split size: "
             f"train={len(train_instances)}, dev={len(dev_instances)}"
@@ -831,6 +829,13 @@ def run_experiment(args: argparse.Namespace) -> dict:
     return payload
 
 
+def _current_tag() -> str:
+    """Tag of the default data checkout; names the default output directory."""
+    from core.instances import determine_data_tag
+
+    return determine_data_tag(ROOT / "data" / "dictorpus-data")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path)
@@ -838,14 +843,19 @@ def main() -> int:
     parser.add_argument(
         "--reference-dir",
         type=Path,
-        default=ROOT / "work" / "experiments" / "v2026.11" / "context-ablation-k5-v1",
+        default=None,
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=ROOT / "work" / "experiments" / "v2026.11" / "t1-frequency-k5-window1-v1",
+        default=None,
     )
     args = parser.parse_args()
+    experiments = ROOT / "work" / "experiments" / _current_tag()
+    if args.reference_dir is None:
+        args.reference_dir = experiments / "context-ablation-k5-v1"
+    if args.output_dir is None:
+        args.output_dir = experiments / "t1-frequency-k5-window1-v1"
     if not args.output_dir.is_absolute():
         args.output_dir = ROOT / args.output_dir
     args.output_dir = args.output_dir.resolve()

@@ -9,6 +9,7 @@ dependencies = ["numpy", "pandas", "zstandard", "scikit-learn", "scipy", "joblib
 
 [project.optional-dependencies]
 dev = ["pytest"]
+plots = ["matplotlib"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -28,9 +28,12 @@ from t1_features.error_analysis import (  # noqa: E402
     validate_frozen_prediction_hash,
 )
 
-DEFAULT_EXPERIMENT = ROOT / "work/experiments/v2026.11/context-ablation-k5-v1"
-DEFAULT_RUN_DIR = DEFAULT_EXPERIMENT / "runs/both/c-7"
-DEFAULT_OUTPUT = ROOT / "work/experiments/v2026.11/t1-dev-error-analysis-a1-v5"
+FROZEN_TAG = "v2026.11"  # release whose dev controls and frozen predictions are pinned
+A1_RUN = "runs/both/c-7"
+A1_OUTPUT_NAME = "t1-dev-error-analysis-a1-v5"
+DEFAULT_EXPERIMENT = ROOT / f"work/experiments/{FROZEN_TAG}/context-ablation-k5-v1"
+DEFAULT_RUN_DIR = DEFAULT_EXPERIMENT / A1_RUN
+DEFAULT_OUTPUT = ROOT / f"work/experiments/{FROZEN_TAG}/{A1_OUTPUT_NAME}"
 
 CSV_FIELDS = {
     "instances": (
@@ -149,7 +152,12 @@ def _load_json(path: Path) -> dict:
 
 
 def _verify_run_metadata(
-    run: dict, experiment: dict, run_dir: Path, experiment_dir: Path, prediction_path: Path
+    run: dict,
+    experiment: dict,
+    run_dir: Path,
+    experiment_dir: Path,
+    prediction_path: Path,
+    expected_tag: str = FROZEN_TAG,
 ) -> None:
     parameters = run.get("parameters", {})
     required = {
@@ -177,8 +185,8 @@ def _verify_run_metadata(
         )
 
     protocol = experiment.get("protocol", {})
-    if protocol.get("data_tag") != "v2026.11" or protocol.get("split") != "dev":
-        raise A1InputError("experiment summary does not identify v2026.11 dev")
+    if protocol.get("data_tag") != expected_tag or protocol.get("split") != "dev":
+        raise A1InputError(f"experiment summary does not identify {expected_tag} dev")
     if protocol.get("suffix_max_length") != 5 or protocol.get("include_affix") is not False:
         raise A1InputError("experiment summary has a different suffix/affix configuration")
     if protocol.get("context_positions") != [-1, 1]:
@@ -189,7 +197,9 @@ def _verify_run_metadata(
     if variant.get("include_left_context") is not True or variant.get("include_right_context") is not True:
         raise A1InputError("experiment summary does not identify the both-context variant")
     selected_c = experiment.get("selected_C", {}).get("both", {}).get("C")
-    if selected_c != 7.0:
+    # T1.1 is defined with C=7 (selected on v2026.11 dev); later releases keep
+    # that definition, so their own dev selection is not required to agree.
+    if expected_tag == FROZEN_TAG and selected_c != 7.0:
         raise A1InputError(f"experiment summary selected C={selected_c!r}, expected C=7")
     try:
         recorded_path = resolve_recorded_prediction_path(
@@ -288,11 +298,21 @@ def _build_provenance(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data/dictorpus-data")
-    parser.add_argument("--tag", default="v2026.11")
-    parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR)
-    parser.add_argument("--experiment-dir", type=Path, default=DEFAULT_EXPERIMENT)
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--tag", default=None, help="data tag (default: tag of --data-dir)")
+    parser.add_argument("--run-dir", type=Path, default=None)
+    parser.add_argument("--experiment-dir", type=Path, default=None)
+    parser.add_argument("--output-dir", type=Path, default=None)
     args = parser.parse_args()
+    if args.tag is None:
+        args.tag = determine_data_tag(args.data_dir.resolve())
+    experiments = ROOT / "work/experiments" / args.tag
+    if args.experiment_dir is None:
+        args.experiment_dir = experiments / "context-ablation-k5-v1"
+    if args.run_dir is None:
+        args.run_dir = args.experiment_dir / A1_RUN
+    if args.output_dir is None:
+        args.output_dir = experiments / A1_OUTPUT_NAME
+    pinned = args.tag == FROZEN_TAG
 
     data_dir = args.data_dir.resolve()
     run_dir = args.run_dir.resolve()
@@ -305,16 +325,19 @@ def main() -> int:
     if args.output_dir.exists() or args.output_dir.is_symlink():
         parser.error(f"refusing to overwrite existing A1 output: {args.output_dir}")
     actual_prediction_hash = _sha256(prediction_path)
-    try:
-        validate_frozen_prediction_hash(actual_prediction_hash)
-    except T1ErrorAnalysisError as exc:
-        parser.error(str(exc))
+    if pinned:
+        try:
+            validate_frozen_prediction_hash(actual_prediction_hash)
+        except T1ErrorAnalysisError as exc:
+            parser.error(str(exc))
     run = _load_json(run_path)
     experiment = _load_json(summary_path)
     try:
-        _verify_run_metadata(run, experiment, run_dir, experiment_dir, prediction_path)
-        if args.tag != "v2026.11" or determine_data_tag(data_dir) != args.tag:
-            raise A1InputError("selected dictorpus-data checkout is not v2026.11")
+        _verify_run_metadata(
+            run, experiment, run_dir, experiment_dir, prediction_path, args.tag
+        )
+        if determine_data_tag(data_dir) != args.tag:
+            raise A1InputError(f"selected dictorpus-data checkout is not {args.tag}")
         expected_data_commit = experiment.get("data", {}).get("commit")
         actual_data_commit = _git_text(["-C", str(data_dir), "rev-parse", "HEAD"])
         if actual_data_commit != expected_data_commit:
@@ -334,7 +357,7 @@ def main() -> int:
             raise A1InputError(
                 f"frozen predictions failed project validation: {validation.errors!r}"
             )
-        if validation.expected_word_count != 2613 or validation.expected_candidate_count != 6519:
+        if pinned and (validation.expected_word_count != 2613 or validation.expected_candidate_count != 6519):
             raise A1InputError(
                 "dev benchmark control totals differ from the prior independent check: "
                 f"{validation.expected_word_count} usages, {validation.expected_candidate_count} candidates"
@@ -346,11 +369,11 @@ def main() -> int:
 
         tables = build_t1_error_tables(inputs.instances, loaded_predictions, inputs.context_words)
         counts = validate_t1_error_table_invariants(tables)
-        if counts["instances"] != 2613 or counts["candidates"] != 6519:
+        if pinned and (counts["instances"] != 2613 or counts["candidates"] != 6519):
             raise A1InputError(f"A1 table counts disagree with controls: {counts!r}")
-        if counts["correct_top1"] != 2255 or counts["errors"] != 358:
+        if pinned and (counts["correct_top1"] != 2255 or counts["errors"] != 358):
             raise A1InputError(f"Top-1 controls disagree with the prior check: {counts!r}")
-        if counts["different_gramset_errors"] != 347 or counts["same_gramset_errors"] != 11:
+        if pinned and (counts["different_gramset_errors"] != 347 or counts["same_gramset_errors"] != 11):
             raise A1InputError(f"gramset error controls disagree with the prior check: {counts!r}")
     except (A1InputError, T1ErrorAnalysisError, ValueError) as exc:
         parser.error(str(exc))

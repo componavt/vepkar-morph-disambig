@@ -23,6 +23,16 @@ _SENTENCE_COLUMNS = ("sentence_id", "text_id", "sentence_xml", "sentence_ru")
 _WORD_COLUMNS = ("word_id", "sentence_id", "word_number", "word")
 _CANDIDATE_COLUMNS = ("word_id", "wordform_id", "gramset_id", "gramset", "relevance")
 
+# Trailing columns appended by later releases (v2026.13: texts.year_published,
+# words.w_id and words.s_id).  Readers accept the base schema with or without
+# them and return only the base columns, so results stay comparable.
+_OPTIONAL_TRAILING_COLUMNS = {
+    "texts": ("year_published",),
+    "sentences": (),
+    "words": ("w_id", "s_id"),
+    "candidate_analyses": (),
+}
+
 _TEXT_RESULT_COLUMNS = ("text_id", "corpus_ids", "dialect_code", "genre_ids", "year_recorded")
 
 _REQUIRED_POSITIVE_IDS = {
@@ -129,7 +139,8 @@ def _read_raw(stem: str, lang: str, data_dir: Path | None) -> pd.DataFrame:
     except Exception as exc:  # malformed CSV, corrupt stream, unsupported engine
         raise DataError(f"Could not read {path}: {exc}") from exc
     actual = tuple(str(col) for col in frame.columns)
-    if actual != expected:
+    extended = expected + _OPTIONAL_TRAILING_COLUMNS[stem]
+    if actual not in (expected, extended):
         raise DataError(
             f"Schema mismatch in {path}: expected columns {list(expected)}, "
             f"got {list(actual)}"

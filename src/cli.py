@@ -102,6 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Directory for the derived split CSV (default: data/derived)",
     )
+    splits.add_argument(
+        "--inherit-from",
+        type=Path,
+        default=None,
+        help=(
+            "Previous split CSV to inherit: known texts keep their split, "
+            "new texts go to train (default: fresh greedy assignment)"
+        ),
+    )
     validate = commands.add_parser(
         "validate-predictions",
         help="Validate one temporary prediction CSV against a benchmark split",

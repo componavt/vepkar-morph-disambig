@@ -18,7 +18,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import t1x_lib as L  # noqa: E402
 
-OUT = L.ROOT / "work/experiments/v2026.11/t1x-v1"
+OUT = L.EXP / "t1x-v1"
 CACHE = OUT / "corpus.pkl"
 
 

@@ -312,6 +312,43 @@ def split_overlap_counts(
     return text_overlap, instance_overlap
 
 
+def read_split_csv(path: Path) -> dict[tuple[str, int], str]:
+    """Read a published split CSV into ``{(language, text_id): split}``."""
+    try:
+        with open(path, newline="", encoding="utf-8") as handle:
+            reader = csv.reader(handle)
+            header = tuple(next(reader, ()))
+            if header != SPLIT_CSV_HEADER:
+                raise SplitError(f"Unexpected split CSV header in {path}: {header}")
+            result: dict[tuple[str, int], str] = {}
+            for row in reader:
+                language, text_id, split = row
+                if split not in SPLIT_NAMES:
+                    raise SplitError(f"Unknown split {split!r} in {path}")
+                result[(language, int(text_id))] = split
+    except OSError as exc:
+        raise SplitError(f"Could not read split file {path}: {exc}") from exc
+    return result
+
+
+def inherit_assignments(
+    weights: tuple[TextWeight, ...],
+    previous: dict[tuple[str, int], str],
+) -> dict[str, tuple[TextWeight, ...]]:
+    """Assign texts of one language by inheriting a previous release's split.
+
+    A text keeps its previous split; a text absent from the previous split is
+    assigned to ``train``.  Dev and test therefore never receive texts that
+    were not in dev or test before, which keeps them free of texts inspected
+    during development.
+    """
+    parts: dict[str, list[TextWeight]] = {name: [] for name in SPLIT_NAMES}
+    for weight in weights:
+        split = previous.get((weight.language, weight.text_id), "train")
+        parts[split].append(weight)
+    return {name: tuple(items) for name, items in parts.items()}
+
+
 def split_csv_bytes(rows: Iterable[tuple[str, int, str]]) -> bytes:
     """Encode the split CSV with the exact agreed header."""
     buffer = io.StringIO()
