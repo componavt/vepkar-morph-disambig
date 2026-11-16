@@ -66,7 +66,8 @@ def error_type(row, types):
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     types = pair_types()
-    lines = ["# T1x — сводка по dev (2 613 употреблений; test не использовался)", ""]
+    n_dev = len(load(MAIN[0][1]))
+    lines = [f"# T1x — сводка по dev ({n_dev:,} употреблений; test не использовался)".replace(",", "\u00a0"), ""]
     lines += ["| Конфигурация | Run | Полный грамсет | С точностью до синкретизма | MRR | vep | krl | olo | lud |",
               "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
     for label, name in MAIN:

@@ -10,6 +10,7 @@ dependencies = ["numpy", "pandas", "zstandard", "scikit-learn", "scipy", "joblib
 [project.optional-dependencies]
 dev = ["pytest"]
 plots = ["matplotlib"]
+neural = ["torch", "transformers", "sentencepiece", "accelerate"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -237,3 +237,6 @@ data/dictorpus-data-*/
 results/**/*.tmp
 results/**/.*.lock
 /data/derived/quality/zero_word_number_sentences_v*.csv
+
+# Extracted paper texts (local working copies)
+papers/
