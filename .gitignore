@@ -240,3 +240,4 @@ results/**/.*.lock
 
 # Extracted paper texts (local working copies)
 papers/
+/ai-notes
